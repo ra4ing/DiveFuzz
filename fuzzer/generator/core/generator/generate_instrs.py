@@ -14,9 +14,13 @@
 import os
 import re
 import random
+import time
 import numpy as np
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+
+# Performance timing enabled via environment variable
+PERF_ENABLED = os.environ.get("DIVEFUZZ_PERF_ENABLE", "0") == "1"
 from ...asm_template_manager import create_template_instance, TemplateInstance
 from ...asm_template_manager.riscv_asm_syntex import ArchConfig
 from ...asm_template_manager.ext_list import allowed_ext
@@ -88,6 +92,10 @@ def generate_instructions(instr_number: int,
     resolve_duplicates = 0
     resolve_duplicates_fail = 0
     c_instr_consecutive_number = 0
+    # Track cumulative time for performance measurement
+    # time_accumulator['spike'] = spike.debug_cmd_str_elf_file execution time
+    # time_accumulator['compile'] = generate_elf execution time
+    time_accumulator = {'spike': 0.0, 'compile': 0.0} if PERF_ENABLED else None
     c_extension = [ "RV64_C", "RV_C"]
     
     #### V ext enable:
@@ -330,7 +338,8 @@ def generate_instructions(instr_number: int,
                                             complete_instr,
                                             True,
                                             label_mgr.get_current_label(),
-                                            template
+                                            template,
+                                            time_accumulator
                                         )
                                         # Wait for thread tasks to complete and retrieve the results
                                         is_diff_rs = future.result()
@@ -359,7 +368,8 @@ def generate_instructions(instr_number: int,
                                             complete_instr,
                                             True,
                                             label_mgr.get_current_label(),
-                                            template
+                                            template,
+                                            time_accumulator
                                         )
 
                                         is_diff_rs = future.result()
@@ -403,7 +413,10 @@ def generate_instructions(instr_number: int,
     
     write_instructions_to_file(new_filename, list2str(entire_instrs), template)
 
-    return resolve_duplicates, resolve_duplicates_fail
+    # Return spike_time and compile_time from time_accumulator
+    spike_time = time_accumulator['spike'] if time_accumulator else 0.0
+    compile_time = time_accumulator['compile'] if time_accumulator else 0.0
+    return resolve_duplicates, resolve_duplicates_fail, spike_time, compile_time
 
 
 def write_instructions_to_file(new_filename: str, instructions: str, template: TemplateInstance):

@@ -1,19 +1,20 @@
 # Copyright (c) 2024-2025 Institute of Information Engineering, Chinese Academy of Sciences
-# 
+#
 # DiveFuzz is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
 # You may obtain a copy of Mulan PSL v2 at:
 #          http://license.coscl.org.cn/MulanPSL2
-# 
+#
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
-# 
+#
 # See the Mulan PSL v2 for more details.
 
 import os
 import subprocess
 import logging
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
@@ -21,6 +22,7 @@ from config.logger_config import create_test_logger
 from config.dut_config import Config, DUTTarget, DirSeedConfig, GeneratedSeedConfig, SeedConfigBase
 from executor.divefuzz_adapter import setup_divefuzz, run_divefuzz
 from utils.results_reporter import TestResult, ResultType, format_duration, generate_result_report, generate_summary_report
+from utils.performance_timer import perf_timer, measure
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,8 +50,10 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
             test_logger.info(f"Working directory: {dut_config.emu_path}")
             
             seed_logger.info("==== TEST OUTPUT BEGIN ====")
+            # Time the RTL/DUT execution
+            rtl_start = time.perf_counter()
             result = subprocess.run(
-                command, 
+                command,
                 shell=True,
                 cwd=dut_config.emu_path,
                 text=True,
@@ -57,6 +61,9 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
                 stderr=subprocess.STDOUT,
                 timeout=300
             )
+            rtl_elapsed = time.perf_counter() - rtl_start
+            perf_timer.add_time(perf_timer.PHASE_RTL_EXECUTION, rtl_elapsed)
+
             # Save output
             seed_logger.info(result.stdout)
             seed_logger.info("==== TEST OUTPUT END ====")
@@ -234,5 +241,14 @@ def run_dut_tests(config: Config, config_filename: str) -> list[TestResult]:
         f"Testing completed: {passed} passed, {failed} failed, "
         f"{timeouts} timed out, {errors} errors. Total: {total}. Duration: {duration_text}"
     )
-    
+
+    # Save and print performance timing results if enabled
+    print(f"[DEBUG] perf_timer.enabled = {perf_timer.enabled}")
+    print(f"[DEBUG] DIVEFUZZ_PERF_ENABLE env = {os.environ.get('DIVEFUZZ_PERF_ENABLE', 'NOT SET')}")
+    if perf_timer.enabled:
+        perf_timer.print_summary()
+        perf_timer.save()
+    else:
+        print("[DEBUG] perf_timer is DISABLED, no timing data collected")
+
     return total_results
