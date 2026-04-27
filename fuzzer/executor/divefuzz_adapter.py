@@ -67,6 +67,14 @@ def setup_divefuzz(seed_config: GeneratedSeedConfig, global_logger):
         template_type=seed_config.divefuzz.template_type,
         allowed_ext_name=seed_config.divefuzz.allowed_ext_name,
         architecture=seed_config.divefuzz.architecture,
+        bug_filter_enable=seed_config.divefuzz.bug_filter_enable,
+        jump_enable=seed_config.divefuzz.jump_enable,
+        stateful_xor_cache=seed_config.divefuzz.stateful_xor_cache,
+        debug=seed_config.divefuzz.debug,
+        debug_mode=seed_config.divefuzz.debug_mode,
+        debug_all=seed_config.divefuzz.debug_all,
+        debug_no_csr=seed_config.divefuzz.debug_no_csr,
+        debug_no_fpr=seed_config.divefuzz.debug_no_fpr,
     )
     _divefuzz_config = setup_config(divefuzz_config)
 
@@ -76,6 +84,17 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
     assert(_divefuzz_config is not None)
     # handle generate
     if seed_config.divefuzz.mode == "generate":
+        debug_config = None
+        if seed_config.divefuzz.debug:
+            debug_config = {
+                "enabled": True,
+                "output_dir": str(seed_config.divefuzz.seeds_output),
+                "mode": seed_config.divefuzz.debug_mode,
+                "accepted_only": not seed_config.divefuzz.debug_all,
+                "log_csr": not seed_config.divefuzz.debug_no_csr,
+                "log_fpr": not seed_config.divefuzz.debug_no_fpr,
+            }
+
         generate_instructions_parallel(
             instr_number=seed_config.divefuzz.ins_num,
             seed_times=seed_config.divefuzz.seeds_num,
@@ -85,7 +104,11 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
             arch=_divefuzz_config.arch,
             template_type=seed_config.divefuzz.template_type,
             out_dir=str(_divefuzz_config.out_dir),
-            architecture=_divefuzz_config.architecture
+            architecture=_divefuzz_config.architecture,
+            debug_config=debug_config,
+            bug_filter_enable=seed_config.divefuzz.bug_filter_enable,
+            jump_enable=seed_config.divefuzz.jump_enable,
+            stateful_xor_cache=seed_config.divefuzz.stateful_xor_cache,
         )
 
     elif seed_config.divefuzz.mode == "mutate":

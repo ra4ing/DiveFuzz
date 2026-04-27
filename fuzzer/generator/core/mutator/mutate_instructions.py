@@ -37,7 +37,6 @@ from ...reg_analyzer.nop_template_gen import generate_nop_elf
 from ...reg_analyzer.spike_session import SpikeSession, SPIKE_ENGINE_AVAILABLE
 from ...reg_analyzer.instruction_validator import InstructionValidator
 from ...config.config_manager import MAX_MUTATE_TIME
-from ...bug_filter import bug_filter
 
 
 # Initial mutation, search within the current extension set.

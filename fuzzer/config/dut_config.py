@@ -59,6 +59,14 @@ class DiveFuzzConfig:
     ins_num: int = 200
     is_cva6: bool = False
     is_rv32: bool = False
+    bug_filter_enable: bool = True
+    jump_enable: bool = True
+    stateful_xor_cache: bool = True
+    debug: bool = False
+    debug_mode: str = 'FULL'
+    debug_all: bool = False
+    debug_no_csr: bool = False
+    debug_no_fpr: bool = False
     
     def __post_init__(self):
         self.seeds_output = os.path.expanduser(self.seeds_output)

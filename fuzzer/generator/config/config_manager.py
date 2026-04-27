@@ -12,7 +12,6 @@
 # See the Mulan PSL v2 for more details.
 
 from ..asm_template_manager.ext_list import allowed_ext
-from ..bug_filter import bug_filter
 from ..asm_template_manager.riscv_asm_syntex import ArchConfig
 
 # ISA strings for different extension profiles
@@ -60,7 +59,6 @@ class Config:
             "boom": "boom",
         }
         self.architecture = arch_mapping.get(args.architecture, args.architecture)
-        bug_filter.set_architecture(self.architecture)
 
         # --template-type: template (xiangshan, cva6, nutshell, etc.)
         self.template_type = str(args.template_type)

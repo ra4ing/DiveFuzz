@@ -24,7 +24,6 @@ Usage:
 
     # Create registry
     registry = FilterRegistry()
-    registry.set_architecture('xs')
 
     # Add filter using decorator
     @pre_execution_filter(name="my_filter", opcodes=["div"])
@@ -36,36 +35,6 @@ Usage:
     registry.register(my_filter)
 """
 
-from typing import List, Optional, Set
-
-# Legacy System
-from .filters import get_known_bugs, match_bug
-
-
-class Filter:
-    """Legacy bug filter using pattern matching."""
-
-    def __init__(self):
-        self.registry = {}
-        self.csr_blacklist: Set[str] = set()
-
-    def set_architecture(self, architecture: str) -> None:
-        self.registry, self.csr_blacklist = get_known_bugs(architecture)
-
-    def filter_known_bug(self, opcode: str, source_values: List[int]) -> Optional[str]:
-        return match_bug(self.registry, opcode, source_values)
-
-    def is_csr_blacklisted(self, csr_name: str) -> bool:
-        return csr_name.lower() in self.csr_blacklist
-
-    def get_csr_blacklist(self) -> Set[str]:
-        return self.csr_blacklist
-
-
-bug_filter = Filter()
-
-
-# Precision Filter System
 from .context import (
     FilterContext,
     PreExecutionState,
@@ -91,10 +60,6 @@ from .registry import (
 
 
 __all__ = [
-    # Legacy
-    "Filter",
-    "bug_filter",
-    # Core
     "FilterContext",
     "PreExecutionState",
     "PostExecutionState",
@@ -106,7 +71,6 @@ __all__ = [
     "FunctionFilter",
     "FilterRegistry",
     "create_registry_for_architecture",
-    # Decorators
     "pre_execution_filter",
     "post_execution_filter",
     "collect_filters_from_caller",

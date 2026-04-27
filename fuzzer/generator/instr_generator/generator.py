@@ -18,7 +18,6 @@ from .formats import INSTRUCTION_FORMATS
 from .sets import INSTRUCTION_SETS
 from .variables import variable_range
 from .memory_manager import MemoryAccessManager
-from ..bug_filter import bug_filter
 
 def gen_imm(imm_type, length):
     """
@@ -232,17 +231,9 @@ def generate_new_instr(new_instr_op, extension, rd_history, rs_history,\
                 # Other special circumstances
                 # For CSR, apply blacklist filtering and avoid SATP
                 if var == 'CSR':
-                    # Filter CSR blacklist
-                    csr_blacklist = bug_filter.get_csr_blacklist()
-                    available_csrs = [csr for csr in variable_range[var]
-                                      if csr.lower() not in csr_blacklist]
-                    if not available_csrs:
-                        # Fallback to original range if all are blacklisted
-                        available_csrs = variable_range[var]
-                    new_parts[var] = random.choice(available_csrs)
-                    # Also try not to choose SATP (1.7% probability)
+                    new_parts[var] = random.choice(variable_range[var])
                     if 'satp' in new_parts[var]:
-                        new_parts[var] = random.choice(available_csrs)
+                        new_parts[var] = random.choice(variable_range[var])
                 else:
                     new_parts[var] = random.choice(variable_range[var])
 

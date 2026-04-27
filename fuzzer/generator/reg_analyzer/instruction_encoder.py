@@ -29,10 +29,10 @@ from typing import Dict, List, Optional, Tuple, Union, Protocol, runtime_checkab
 
 try:
     from .register_mapping import RegisterMapping
-    from ..asm_template_manager.riscv_asm_syntex.csr import CSR
+    from ..asm_template_manager.riscv_asm_syntex.csr import CSR, CSR_NAME_TO_ADDR
 except ImportError:
     from register_mapping import RegisterMapping
-    from asm_template_manager.riscv_asm_syntex.csr import CSR
+    from asm_template_manager.riscv_asm_syntex.csr import CSR, CSR_NAME_TO_ADDR
 
 
 # ============================================================================
@@ -529,6 +529,15 @@ class InstructionEncoder:
         if opcode == 'fence':
             return self._preprocess_fence(opcode, operands, variable_fields)
 
+        # fence.i — zero-operand form: fill imm12=0, rs1=x0, rd=x0
+        if opcode == 'fence.i' and len(operands) == 0:
+            return opcode, ['0', 'x0', 'x0']
+
+        # CSR register-form instructions: asm syntax is csrrX rd, csr, rs1
+        # but variable_fields order is [rd, rs1, csr] — swap operands[1] and operands[2]
+        if opcode in ('csrrs', 'csrrw', 'csrrc') and len(operands) == 3:
+            return opcode, [operands[0], operands[2], operands[1]]
+
         # AMO instructions (check suffix first)
         if (opcode.startswith('amo') or opcode.startswith('lr.') or
             opcode.startswith('sc.') or '.aq' in opcode or '.rl' in opcode):
@@ -936,7 +945,11 @@ class InstructionEncoder:
 
             elif 'imm' in field_name or field_name in ['csr', 'shamt', 'shamtw', 'shamtd',
                                                         'zimm', 'simm', 'rm', 'aqrl']:
-                # Immediate numbers or special fields
+                # For CSR fields, resolve symbolic names to addresses first
+                if field_name == 'csr':
+                    csr_name = operand_str.strip().lower()
+                    if csr_name in CSR_NAME_TO_ADDR:
+                        operand_str = str(CSR_NAME_TO_ADDR[csr_name])
                 imm_value = self._parse_immediate(operand_str)
                 field_value = self._encode_immediate_field(imm_value, field_name, encoding)
 

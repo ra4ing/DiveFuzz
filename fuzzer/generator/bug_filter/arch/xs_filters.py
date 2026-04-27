@@ -16,10 +16,10 @@ Filter Categories:
     - V: Vector Extension (V-1 to V-6)
     - T: Trap Value Registers (T-1 to T-3)
     - C: Counters and Timers (C-1 to C-4)
-    - W: CSR WARL Fields (W-1 to W-15)
+    - W: CSR WARL Fields (W-1 to W-18)
     - A: Atomic Operations (A-1 to A-2)
     - M: Memory Access (M-1)
-    - P: Privilege/Timing (P-1 to P-2)
+    - P: Privilege/Timing (P-1 to P-3)
 """
 
 from typing import Optional
@@ -36,11 +36,6 @@ from ...asm_template_manager.riscv_asm_syntex.csr import CSR, CSR_NAME_TO_ADDR
 # =============================================================================
 # Helper Functions
 # =============================================================================
-
-
-def _is_csr_write(opcode: str) -> bool:
-    """Check if opcode is a CSR write operation."""
-    return opcode in ("csrrw", "csrrwi")
 
 
 def _parse_csr_from_operands(operands: list) -> Optional[int]:
@@ -60,6 +55,21 @@ def _parse_csr_from_operands(operands: list) -> Optional[int]:
 def _get_privilege(ctx) -> int:
     """Get current privilege level (0=U, 1=S, 3=M)."""
     return ctx.s_pre.privilege
+
+
+_LOAD_STORE_SIZE_MAP = {
+    "lb": 1, "lbu": 1, "sb": 1,
+    "lh": 2, "lhu": 2, "sh": 2,
+    "lw": 4, "lwu": 4, "sw": 4, "flw": 4, "fsw": 4,
+    "ld": 8, "sd": 8, "fld": 8, "fsd": 8,
+    "flq": 16, "fsq": 16,
+    "lr.w": 4, "lr.d": 8, "sc.w": 4, "sc.d": 8,
+}
+
+
+def _get_scalar_access_size(opcode_lower: str) -> int:
+    """Return access size in bytes for a scalar load/store opcode, 0 if unknown/vector."""
+    return _LOAD_STORE_SIZE_MAP.get(opcode_lower, 0)
 
 
 # =============================================================================
@@ -82,7 +92,9 @@ def v1_tail_agnostic_filter(ctx):
 
     vta = (post_vtype >> 6) & 1 if post_vtype else 0
     if vta == 1 and post_vl < post_vlmax:
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "V-1: Tail agnostic (vta=1) with vl<VLMAX - tail elements are implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -105,7 +117,9 @@ def v2_mask_agnostic_filter(ctx):
     )
 
     if vma == 1 and uses_mask:
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "V-2: Mask agnostic (vma=1) with masked instruction - mask elements are implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -123,7 +137,9 @@ def v3_vl_avl_gt_vlmax_filter(ctx):
         pre_vl = ctx.get_vl()
         post_vl = ctx.get_post_vl()
         if pre_vl != post_vl and post_vl > 0:
-            return FilterResult.accept()
+            return FilterResult.reject(
+                "V-3: vsetvl changed vl - AVL>VLMAX clamping is implementation-defined"
+            )
 
     return FilterResult.accept()
 
@@ -139,7 +155,9 @@ def v4_vtype_vill_filter(ctx):
 
     post_vtype = ctx.get_post_vtype()
     if post_vtype & 0x80000000:
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "V-4: vtype vill bit set - remaining fields are implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -245,10 +263,9 @@ def t1_trap_tval_filter(ctx):
         return FilterResult.accept()
 
     if ctx.was_trapped():
-        # Trap occurred - xtval differences are implementation-defined
-        # We should not filter based on trap value differences
-        # The filter framework should compare only xcause
-        pass
+        return FilterResult.reject(
+            "T-1: Trap occurred - xtval content is implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -282,9 +299,9 @@ def t2_htval_filter(ctx):
     post_htval = ctx.get_post_csr(CSR.HTVAL)
 
     if pre_htval != post_htval:
-        # htval changed - this is a hypervisor trap scenario
-        # Differences in htval are implementation-defined
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "T-2: htval changed on H-ext trap - content is implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -312,9 +329,9 @@ def t3_htinst_filter(ctx):
     post_htinst = ctx.get_post_csr(CSR.HTINST)
 
     if pre_htinst != post_htinst:
-        # htinst changed - hypervisor trap scenario
-        # Differences are implementation-defined
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "T-3: htinst changed on H-ext trap - content is implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -368,7 +385,7 @@ def c2_time_filter(ctx):
     Action: Reject
     """
     csr_addr = _parse_csr_from_operands(ctx.operands)
-    if csr_addr in (CSR.TIME, 0xC81):  # time and timeh
+    if csr_addr in (CSR.TIME, CSR.TIMEH):
         return FilterResult.reject(
             "C-2: Time counter read - no synchronization with REF"
         )
@@ -397,10 +414,16 @@ def c3_hpmcounter_filter(ctx):
     if csr_addr is None:
         return FilterResult.accept()
 
-    # Check hpmcounter3 through hpmcounter31
-    if 0xC03 <= csr_addr <= 0xC1F:
+    # Check hpmcounter3 through hpmcounter31 (user-mode, 0xC03-0xC1F)
+    # Check mhpmcounter3 through mhpmcounter31 (machine-mode, 0xB03-0xB1F)
+    # Check mhpmcounterh3 through mhpmcounterh31 (M-mode RV32 high, 0xB83-0xB9F)
+    # All HPM counters are implementation-defined: number of counters,
+    # countable events, and access/trap behavior differ between REF and DUT.
+    if (0xC03 <= csr_addr <= 0xC1F
+            or 0xB03 <= csr_addr <= 0xB1F
+            or 0xB83 <= csr_addr <= 0xB9F):
         return FilterResult.reject(
-            f"C-3: HPM counter 0x{csr_addr:x} read - implementation-dependent"
+            f"C-3: HPM counter 0x{csr_addr:x} access - implementation-dependent"
         )
     return FilterResult.accept()
 
@@ -428,8 +451,9 @@ def c4_minstret_filter(ctx):
     post_instret = ctx.get_post_csr(CSR.INSTRET)
 
     if ctx.was_trapped() and pre_instret != post_instret:
-        # Trap occurred and instret changed - boundary case
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "C-4: minstret changed on trap - instruction retirement boundary is implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -491,27 +515,39 @@ def w1_tvec_mode_filter(ctx):
     return FilterResult.accept()
 
 
-# W-2: mtvec/stvec BASE alignment - Post filter
+# W-2: mtvec/stvec/vstvec WARL - Post filter
 @post_execution_filter(
-    name="W-2_tvec_base_alignment",
-    description="Ignore BASE field differences when MODE=1 (Vectored) - alignment is implementation-defined",
+    name="W-2_tvec_warl",
+    description="Ignore tvec BASE/MODE field differences after write - WARL behavior is implementation-defined",
 )
 def w2_tvec_base_filter(ctx):
     """
-    W-2: tvem BASE alignment for Vectored mode.
+    W-2: tvec WARL fields.
 
-    In Vectored mode, BASE must be aligned on a 4-byte boundary, but additional
-    alignment constraints are implementation-defined.
+    For mtvec/stvec/vstvec, both MODE and BASE have WARL constraints.
+    Even with valid MODE (0 or 1), the BASE alignment requirements are
+    implementation-defined. Writing unaligned BASE may cause different
+    WARL corrections between Spike and XiangShan.
 
     Phase: Post
-    Condition: tvec written with MODE=1, BASE field differs
-    Action: Ignore BASE differences when MODE=1
+    Condition: tvec written, read-back value differs
+    Action: Ignore differences
     """
     if ctx.s_post is None:
         return FilterResult.accept()
 
-    # This is a post-filter that would be applied when comparing states
-    # The comparison logic should ignore BASE field when MODE=1
+    csr_addr = _parse_csr_from_operands(ctx.operands)
+    if csr_addr not in (CSR.MTVEC, CSR.STVEC, CSR.VSTVEC):
+        return FilterResult.accept()
+
+    pre_tvec = ctx.get_csr(csr_addr)
+    post_tvec = ctx.get_post_csr(csr_addr)
+
+    if pre_tvec != post_tvec:
+        return FilterResult.reject(
+            "W-2: tvec WARL fields (BASE/MODE) differ - alignment constraints are implementation-defined"
+        )
+
     return FilterResult.accept()
 
 
@@ -538,9 +574,14 @@ def w3_mstatus_fs_vs_filter(ctx):
     post_mstatus = ctx.get_post_csr(CSR.MSTATUS)
 
     if pre_mstatus != post_mstatus:
-        # mstatus changed - check FS (bits[14:13]) and VS (bits[10:9])
-        # These are WARL fields - differences are allowed
-        return FilterResult.accept()
+        pre_fs = (pre_mstatus >> 13) & 0x3
+        post_fs = (post_mstatus >> 13) & 0x3
+        pre_vs = (pre_mstatus >> 9) & 0x3
+        post_vs = (post_mstatus >> 9) & 0x3
+        if pre_fs != post_fs or pre_vs != post_vs:
+            return FilterResult.reject(
+                "W-3: mstatus FS/VS WARL field differs - state transitions are implementation-defined"
+            )
 
     return FilterResult.accept()
 
@@ -568,9 +609,14 @@ def w4_mstatus_pp_filter(ctx):
     post_mstatus = ctx.get_post_csr(CSR.MSTATUS)
 
     if pre_mstatus != post_mstatus:
-        # MPP is bits[12:11], SPP is bit[8]
-        # Differences in these WARL fields are implementation-defined
-        return FilterResult.accept()
+        pre_mpp = (pre_mstatus >> 11) & 0x3
+        post_mpp = (post_mstatus >> 11) & 0x3
+        pre_spp = (pre_mstatus >> 8) & 0x1
+        post_spp = (post_mstatus >> 8) & 0x1
+        if pre_mpp != post_mpp or pre_spp != post_spp:
+            return FilterResult.reject(
+                "W-4: mstatus MPP/SPP WARL field differs - unsupported privilege encodings"
+            )
 
     return FilterResult.accept()
 
@@ -594,7 +640,17 @@ def w5_mstatus_endianness_filter(ctx):
     if ctx.s_post is None:
         return FilterResult.accept()
 
-    # This filter handles endianness bit differences
+    csr_addr = _parse_csr_from_operands(ctx.operands)
+    if csr_addr in (CSR.MSTATUS, CSR.MSTATUSH):
+        pre_val = ctx.get_csr(csr_addr)
+        post_val = ctx.get_post_csr(csr_addr)
+        # UBE is bit 6 of mstatus, SBE is bit 36, MBE is bit 37
+        endianness_mask = (1 << 6) | (1 << 36) | (1 << 37)
+        if (pre_val & endianness_mask) != (post_val & endianness_mask):
+            return FilterResult.reject(
+                "W-5: mstatus endianness bits (UBE/SBE/MBE) differ - fixed-endianness implementations wire to 0"
+            )
+
     return FilterResult.accept()
 
 
@@ -642,8 +698,10 @@ def w7_delegation_filter(ctx):
         return FilterResult.accept()
 
     csr_addr = _parse_csr_from_operands(ctx.operands)
-    if csr_addr in (CSR.MEDELEG, CSR.MIDELEG, 0x602, 0x603):  # hedeleg, hideleg
-        return FilterResult.accept()
+    if csr_addr in (CSR.MEDELEG, CSR.MIDELEG, CSR.HEDELEG, CSR.HIDELEG):
+        return FilterResult.reject(
+            "W-7: Delegation CSR written - non-standard delegation bits are WARL"
+        )
 
     return FilterResult.accept()
 
@@ -669,7 +727,9 @@ def w8_mip_sie_filter(ctx):
 
     csr_addr = _parse_csr_from_operands(ctx.operands)
     if csr_addr in (CSR.MIP, CSR.SIP, CSR.MIE, CSR.SIE):
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "W-8: Interrupt pending/enable CSR written - SEIP/STIP bits are WARL"
+        )
 
     return FilterResult.accept()
 
@@ -694,7 +754,9 @@ def w9_counteren_filter(ctx):
 
     csr_addr = _parse_csr_from_operands(ctx.operands)
     if csr_addr in (CSR.MCOUNTEREN, CSR.SCOUNTEREN, CSR.MCOUNTINHIBIT):
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "W-9: Counter enable/inhibit CSR written - non-existent counter bits are WARL"
+        )
 
     return FilterResult.accept()
 
@@ -721,7 +783,9 @@ def w10_hstatus_filter(ctx):
     post_hstatus = ctx.get_post_csr(CSR.HSTATUS)
 
     if pre_hstatus != post_hstatus:
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "W-10: hstatus WARL fields (VSXL/VGEIN) differ - implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -747,7 +811,9 @@ def w11_hgeie_hvip_filter(ctx):
 
     csr_addr = _parse_csr_from_operands(ctx.operands)
     if csr_addr in (CSR.HGEIE, CSR.HVIP):
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "W-11: hgeie/hvip WARL - guest interrupt source count is implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -773,7 +839,9 @@ def w12_satp_filter(ctx):
 
     csr_addr = _parse_csr_from_operands(ctx.operands)
     if csr_addr in (CSR.SATP, CSR.VSATP, CSR.HGATP):
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "W-12: satp/vsatp/hgatp WARL - MODE/ASID fields are implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -800,8 +868,10 @@ def w13_pmp_filter(ctx):
     csr_addr = _parse_csr_from_operands(ctx.operands)
     if (
         csr_addr is not None and 0x3A0 <= csr_addr <= 0x3BF
-    ):  # PMP CFG and ADDR registers
-        return FilterResult.accept()
+    ):
+        return FilterResult.reject(
+            f"W-13: PMP CSR 0x{csr_addr:x} - entry count/granularity/modes are implementation-defined"
+        )
 
     return FilterResult.accept()
 
@@ -826,7 +896,9 @@ def w14_envcfg_filter(ctx):
 
     csr_addr = _parse_csr_from_operands(ctx.operands)
     if csr_addr in (CSR.MENVCFG, CSR.SENVCFG, CSR.HENVCFG):
-        return FilterResult.accept()
+        return FilterResult.reject(
+            "W-14: envcfg CSR written - unimplemented extension bits are WARL"
+        )
 
     return FilterResult.accept()
 
@@ -883,6 +955,94 @@ def w15_frm_reserved_filter(ctx):
     return FilterResult.accept()
 
 
+# W-16: senvcfg access - Pre filter
+@pre_execution_filter(
+    name="W-16_senvcfg_access",
+    opcodes=["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"],
+    description="Reject any access to senvcfg - trap behavior for S-mode access differs between Spike and XiangShan",
+)
+def w16_senvcfg_filter(ctx):
+    """
+    W-16: senvcfg CSR access.
+
+    senvcfg (0x10A) access permission is implementation-defined. In S-mode,
+    Spike may allow the access while XiangShan treats it as illegal instruction
+    (cause=2), causing privilege mode and CSR state divergence.
+    In M-mode the access is well-defined for both implementations.
+
+    Phase: Pre
+    Condition: CSR instruction targeting senvcfg in non-M-mode
+    Action: Reject
+    """
+    csr_addr = _parse_csr_from_operands(ctx.operands)
+    if csr_addr == CSR.SENVCFG:
+        privilege = _get_privilege(ctx)
+        if privilege < 3:
+            return FilterResult.reject(
+                "W-16: senvcfg access in non-M mode - trap behavior is implementation-defined"
+            )
+
+    return FilterResult.accept()
+
+
+# W-17: henvcfg access - Pre filter
+@pre_execution_filter(
+    name="W-17_henvcfg_access",
+    opcodes=["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"],
+    description="Reject any access to henvcfg - exception classification differs between Spike and XiangShan",
+)
+def w17_henvcfg_filter(ctx):
+    """
+    W-17: henvcfg CSR access.
+
+    henvcfg (0x60A) exception classification is implementation-defined.
+    Spike may report H-extension specific exception codes while XiangShan
+    reports illegal instruction (cause=2), causing mcause divergence.
+    In M-mode the access is well-defined for both implementations.
+
+    Phase: Pre
+    Condition: CSR instruction targeting henvcfg in non-M-mode
+    Action: Reject
+    """
+    csr_addr = _parse_csr_from_operands(ctx.operands)
+    if csr_addr == CSR.HENVCFG:
+        privilege = _get_privilege(ctx)
+        if privilege < 3:
+            return FilterResult.reject(
+                "W-17: henvcfg access in non-M mode - exception classification is implementation-defined"
+            )
+
+    return FilterResult.accept()
+
+
+# W-18: hstatus access - Pre filter
+@pre_execution_filter(
+    name="W-18_hstatus_access",
+    opcodes=["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"],
+    description="Reject any access to hstatus - WARL fields (VGEIN, VSXL, etc.) differ between Spike and XiangShan",
+)
+def w18_hstatus_filter(ctx):
+    """
+    W-18: hstatus CSR access.
+
+    hstatus (0x600) contains multiple WARL fields including VGEIN (bits [17:12]),
+    VSXL (bits [33:32]), VTSR, VTW, VTVM. These fields differ between Spike and
+    XiangShan even on read (reset values differ). csrrs with non-zero source also
+    writes (read-modify-write), so all CSR opcodes must be rejected.
+
+    Phase: Pre
+    Condition: Any CSR instruction targeting hstatus (0x600)
+    Action: Reject
+    """
+    csr_addr = _parse_csr_from_operands(ctx.operands)
+    if csr_addr == CSR.HSTATUS:
+        return FilterResult.reject(
+            "W-18: hstatus access - WARL fields differ between implementations"
+        )
+
+    return FilterResult.accept()
+
+
 # =============================================================================
 # E. Atomic Operations (A-1 to A-2)
 # =============================================================================
@@ -892,10 +1052,16 @@ def w15_frm_reserved_filter(ctx):
 @post_execution_filter(
     name="A-1_lr_sc_reservation_set",
     description="Ignore SC result differences - reservation set size is implementation-defined",
+    opcodes=["lr.w", "lr.d", "sc.w", "sc.d"],
 )
 def a1_lr_sc_filter(ctx):
     if ctx.s_post is None:
         return FilterResult.accept()
+    opcode_lower = ctx.opcode.lower()
+    if opcode_lower in ("sc.w", "sc.d"):
+        return FilterResult.reject(
+            "A-1: SC instruction - reservation set size and success/failure is implementation-defined"
+        )
     return FilterResult.accept()
 
 
@@ -903,11 +1069,14 @@ def a1_lr_sc_filter(ctx):
 @post_execution_filter(
     name="A-2_sc_spurious_failure",
     description="Ignore SC failures where DUT failed but would have succeeded - spurious failures are allowed",
+    opcodes=["sc.w", "sc.d"],
 )
 def a2_sc_spurious_failure_filter(ctx):
     if ctx.s_post is None:
         return FilterResult.accept()
-    return FilterResult.accept()
+    return FilterResult.reject(
+        "A-2: SC instruction - spurious failure is allowed by spec"
+    )
 
 
 # =============================================================================
@@ -934,29 +1103,27 @@ def m1_misaligned_filter(ctx):
     opcode_lower = ctx.opcode.lower()
 
     # Check if this is a load or store instruction
-    is_load = any(opcode_lower.startswith(prefix) for prefix in ("l", "vl", "fl"))
-    is_store = any(opcode_lower.startswith(prefix) for prefix in ("s", "vs", "fs"))
+    # Use precise opcode prefixes to avoid matching non-memory instructions
+    # (e.g., "li"/"la"/"lui" are NOT loads, "sub"/"sll"/"srl" are NOT stores)
+    load_prefixes = (
+        "lb", "lbu", "lh", "lhu", "lw", "lwu", "ld",
+        "vl", "vlw", "vlh", "vlb", "vld", "vlwu", "vlhu", "vlbu",
+        "flw", "fld", "flq",
+        "lr.w", "lr.d",
+    )
+    store_prefixes = (
+        "sb", "sh", "sw", "sd",
+        "vs", "vsw", "vsh", "vsb", "vsd",
+        "fsw", "fsd", "fsq",
+        "sc.w", "sc.d",
+    )
+    is_load = any(opcode_lower.startswith(prefix) for prefix in load_prefixes)
+    is_store = any(opcode_lower.startswith(prefix) for prefix in store_prefixes)
 
     if not (is_load or is_store):
         return FilterResult.accept()
 
-    # Get access size from opcode
-    access_size = 0
-    opcode_base = opcode_lower.strip().rstrip(".s").rstrip(".d").rstrip(".q")
-
-    # Determine size by opcode suffix
-    if "d" in opcode_base:  # ld, sd, vld.v, vsd.v, etc.
-        access_size = 8
-    elif "w" in opcode_base or "wu" in opcode_base:  # lw, sw, lwu, vlw.v, vsw.v
-        access_size = 4
-    elif "h" in opcode_base:  # lh, sh, lhu
-        access_size = 2
-    elif "b" in opcode_base:  # lb, sb
-        access_size = 1
-    else:
-        # For vector loads/stores or others, assume word alignment
-        access_size = 4
-
+    access_size = _get_scalar_access_size(opcode_lower)
     if access_size == 0:
         return FilterResult.accept()
 
@@ -1064,8 +1231,64 @@ def p2_stimecmp_stip_filter(ctx):
 
     # Check if this was a stimecmp write
     csr_addr = _parse_csr_from_operands(ctx.operands)
-    if csr_addr in (0x280, 0x281):  # stimecmp and stimecmph (if RV32)
-        return FilterResult.accept()
+    if csr_addr in (CSR.STIMECMP, CSR.STIMECMPH):
+        return FilterResult.reject(
+            "P-2: stimecmp written - STIP update timing is not guaranteed immediate"
+        )
+
+    return FilterResult.accept()
+
+
+# P-2a: stimecmp access - Pre filter
+@pre_execution_filter(
+    name="P-2a_stimecmp_access",
+    opcodes=["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"],
+    description="Reject any access to stimecmp - STIP update timing after write is implementation-defined",
+)
+def p2a_stimecmp_filter(ctx):
+    """
+    P-2a: stimecmp CSR access.
+
+    Writing stimecmp (0x14D) / stimecmph (0x15D) may cause mip.STIP to
+    differ immediately between Spike and XiangShan. STIP becomes pending when
+    time >= stimecmp, but the update timing is not guaranteed immediate.
+
+    Phase: Pre
+    Condition: Any CSR instruction targeting stimecmp (0x14D) or stimecmph (0x15D)
+    Action: Reject
+    """
+    csr_addr = _parse_csr_from_operands(ctx.operands)
+    if csr_addr in (CSR.STIMECMP, CSR.STIMECMPH):
+        return FilterResult.reject(
+            f"P-2a: stimecmp (0x{csr_addr:x}) access - STIP timing is implementation-defined"
+        )
+
+    return FilterResult.accept()
+
+
+# P-3: vstimecmp access - Pre filter
+@pre_execution_filter(
+    name="P-3_vstimecmp_access",
+    opcodes=["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"],
+    description="Reject any access to vstimecmp - STIP update timing after write is implementation-defined",
+)
+def p3_vstimecmp_filter(ctx):
+    """
+    P-3: vstimecmp CSR access.
+
+    Writing vstimecmp (0x24D) / vstimecmph (0x25D) may cause mip.STIP to
+    differ immediately between Spike and XiangShan. STIP becomes pending when
+    time >= stimecmp, but the update timing is not guaranteed immediate.
+
+    Phase: Pre
+    Condition: Any CSR instruction targeting vstimecmp (0x24D) or vstimecmph (0x25D)
+    Action: Reject
+    """
+    csr_addr = _parse_csr_from_operands(ctx.operands)
+    if csr_addr in (CSR.VSTIMECMP, CSR.VSTIMECMPH):
+        return FilterResult.reject(
+            f"P-3: vstimecmp (0x{csr_addr:x}) access - STIP timing is implementation-defined"
+        )
 
     return FilterResult.accept()
 

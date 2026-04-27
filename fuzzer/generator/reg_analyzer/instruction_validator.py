@@ -18,7 +18,6 @@ All-in-one instruction validation with:
 - Instruction encoding (HybridEncoder)
 - Instruction parsing (InstructionParser)
 - XOR uniqueness checking (XORCache - fast Bloom filter)
-- Legacy bug filtering (bug_filter) - backward compatible
 - Precision filtering (FilterRegistry) - two-phase runtime state inspection
 - Spike execution (SpikeSession)
 - Debug logging (SpikeDebugLogger)
@@ -35,18 +34,9 @@ Two-Phase Filtering:
         - Checkpoint rollback on rejection
 
 Usage:
-    # Legacy mode (backward compatible)
-    validator = InstructionValidator(
-        spike_session=session,
-        xor_cache=xor_cache,
-        architecture='xs'
-    )
-
-    # Precision mode (recommended)
     from bug_filter import FilterRegistry, register_architecture_filters
 
     registry = FilterRegistry()
-    registry.set_architecture('xs')
     register_architecture_filters('xs', registry)
 
     validator = InstructionValidator(
@@ -72,7 +62,6 @@ try:
     from .xor_cache import XORCache, compute_xor
     from .spike_debug_logger import SpikeDebugLogger
     from .stateful_xor_cache import StatefulXORCache, InstructionContext
-    from ..bug_filter import bug_filter
     from ..bug_filter.context import (
         FilterContext,
         PreExecutionState,
@@ -91,7 +80,6 @@ except ImportError:
     from xor_cache import XORCache, compute_xor
     from spike_debug_logger import SpikeDebugLogger
     from stateful_xor_cache import StatefulXORCache, InstructionContext
-    from bug_filter import bug_filter
     from bug_filter.context import FilterContext, PreExecutionState, PostExecutionState
     from bug_filter.registry import FilterRegistry
 
@@ -104,7 +92,6 @@ class InstructionValidator:
 
     Integrates:
     - XOR computation and uniqueness check via XORCache
-    - Legacy bug filtering via bug_filter (backward compatible)
     - Precision filtering via FilterRegistry (two-phase)
     - Spike execution with checkpoint protection
 
@@ -156,9 +143,6 @@ class InstructionValidator:
         self.use_stateful_cache = use_stateful_cache
         self.bug_filter_enable = bug_filter_enable
 
-        if architecture:
-            bug_filter.set_architecture(architecture)
-
     def _read_register(self, reg_idx: int) -> int:
         """Read register value by index (0-31: XPR, 32-63: FPR)."""
         if reg_idx < 32:
@@ -190,10 +174,6 @@ class InstructionValidator:
         else:
             is_unique = self.xor_cache.check_and_add(opcode, xor_value)
         return xor_value, is_unique
-
-    def _check_bug_legacy(self, opcode: str, source_values: List[int]) -> Optional[str]:
-        """Check if instruction triggers a known bug (legacy filter)."""
-        return bug_filter.filter_known_bug(opcode, source_values)
 
     def _build_pre_execution_state(self) -> PreExecutionState:
         """
@@ -271,11 +251,6 @@ class InstructionValidator:
         xor_value, is_unique = self._check_xor_unique(opcode, source_values)
         if not is_unique:
             return False, 0
-
-        if self.bug_filter_enable:
-            bug_name = self._check_bug_legacy(opcode, source_values)
-            if bug_name:
-                return False, 0
 
         s_pre = None
         if self.precision_registry:

@@ -25,14 +25,6 @@ making the architecture more modular and testable.
 
 from typing import Optional, List, Tuple
 
-try:
-    from ..bug_filter import bug_filter
-except ImportError:
-    import sys
-    from pathlib import Path
-    sys.path.append(str(Path(__file__).parent.parent))
-    from bug_filter import bug_filter
-
 
 def compute_xor(values: List[int]) -> int:
     """
@@ -76,18 +68,7 @@ class InstructionPostProcessor:
     """
 
     def __init__(self, shared_xor_cache, architecture: str = ""):
-        """
-        Initialize post processor.
-
-        Args:
-            shared_xor_cache: Manager.dict for cross-process XOR sharing
-            architecture: Architecture name for bug filtering ('xs', 'nts', 'rkt', 'kmh')
-        """
         self.confirmed_xor_values = shared_xor_cache
-
-        # Initialize bug filter if architecture is specified
-        if architecture:
-            bug_filter.set_architecture(architecture)
 
     def compute_xor(self, source_values: List[int]) -> int:
         """
@@ -107,18 +88,7 @@ class InstructionPostProcessor:
         dest_values: List[int],
         source_values: List[int]
     ) -> Optional[str]:
-        """
-        Check if instruction triggers a known bug.
-
-        Args:
-            opcode: Instruction opcode (e.g., "add", "sc.w")
-            dest_values: Destination register values after execution
-            source_values: Source register values before execution
-
-        Returns:
-            Bug name if instruction matches a known bug pattern, None otherwise
-        """
-        return bug_filter.filter_known_bug(opcode, dest_values, source_values)
+        return None
 
     def check_xor_uniqueness(self, opcode: str, xor_value: int) -> bool:
         """

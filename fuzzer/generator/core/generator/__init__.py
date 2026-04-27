@@ -12,11 +12,32 @@
 # See the Mulan PSL v2 for more details.
 
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
+import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from tqdm import tqdm
 from .generate_instrs import generate_instructions
 from ...asm_template_manager.riscv_asm_syntex import ArchConfig
 from ...reg_analyzer.stateful_xor_cache import StatefulXORCache
+
+
+def _terminate_executor_workers(executor: ProcessPoolExecutor):
+    """
+    Terminate running worker processes after a generation timeout.
+
+    ProcessPoolExecutor.cancel() only affects tasks that have not started.  A
+    timed-out generator task may still be running inside a worker, so terminate
+    those workers before creating a fresh executor for retry isolation.
+    """
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return
+
+    for process in processes.values():
+        if process.is_alive():
+            process.terminate()
+
+    for process in processes.values():
+        process.join(timeout=1)
 
 
 def generate_instructions_parallel(
@@ -29,7 +50,7 @@ def generate_instructions_parallel(
     template_type: str,
     out_dir: str = "out-seeds-2025-test",
     architecture: str = "xs",
-    debug_config: dict = None,
+    debug_config: dict | None = None,
     stateful_xor_cache: bool = True,
     bug_filter_enable: bool = True,
     jump_enable: bool = True,
@@ -66,7 +87,7 @@ def generate_instructions_parallel(
     timeout_count = 0
 
     # The timeout period = the number of instructions * 0.8 seconds
-    timeout_seconds = instr_number * 0.8
+    timeout_seconds = instr_number * 0.05
     # Maximum retry count to prevent unlimited retries
     max_retries = 5
 
@@ -122,60 +143,99 @@ def generate_instructions_parallel(
         completed_count = 0
         retry_round = 0
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            while pending_seeds and retry_round < max_retries:
-                if retry_round > 0:
-                    print(
-                        f"# Retry round {retry_round}/{max_retries} for {len(pending_seeds)} timed out seeds"
-                    )
-
-                futures = {}
-                for seed_idx in pending_seeds:
-                    future = executor.submit(
-                        generate_instructions,
-                        instr_number,
-                        seed_idx,
-                        eliminate_enable,
-                        is_rv32,
-                        arch,
-                        template_type,
-                        out_dir,
-                        xor_cache_state,
-                        architecture,
-                        debug_config,
-                        bug_filter_enable,
-                        jump_enable,
-                    )
-                    futures[future] = seed_idx
-
-                # Clear the pending list and get ready to collect the failed tasks
-                pending_seeds = []
-
-                # collect results
-                for future in tqdm(
-                    as_completed(futures),
-                    total=len(futures),
-                    desc="# Generating instructions",
-                ):
-                    seed_idx = futures[future]
-                    try:
-                        result1, result2 = future.result(timeout=timeout_seconds)
-                        resolve_duplicates += result1
-                        resolve_duplicates_fail += result2
-                        completed_count += 1
-                    except TimeoutError:
-                        timeout_count += 1
-                        print(f"# Seed {seed_idx} timed out ({timeout_seconds}s)")
-                        pending_seeds.append(seed_idx)
-                    except Exception as e:
-                        print(f"# Error generating seed {seed_idx}: {e}")
-
-                retry_round += 1
-
-            if pending_seeds:
+        while pending_seeds and retry_round < max_retries:
+            if retry_round > 0:
                 print(
-                    f"# {len(pending_seeds)} seeds failed after {max_retries} retry rounds, skipping"
+                    f"# Retry round {retry_round}/{max_retries} for {len(pending_seeds)} timed out seeds"
                 )
+
+            retry_seeds = []
+            seed_batches = [
+                pending_seeds[index : index + max_workers]
+                for index in range(0, len(pending_seeds), max_workers)
+            ]
+
+            for seed_batch in seed_batches:
+                executor = ProcessPoolExecutor(max_workers=max_workers)
+                futures = {}
+                timed_out = False
+
+                try:
+                    for seed_idx in seed_batch:
+                        future = executor.submit(
+                            generate_instructions,
+                            instr_number,
+                            seed_idx,
+                            eliminate_enable,
+                            is_rv32,
+                            arch,
+                            template_type,
+                            out_dir,
+                            xor_cache_state,
+                            architecture,
+                            debug_config,
+                            bug_filter_enable,
+                            jump_enable,
+                        )
+                        futures[future] = seed_idx
+
+                    progress = tqdm(
+                        total=len(futures),
+                        desc="# Generating instructions",
+                    )
+                    deadline = time.monotonic() + timeout_seconds
+                    unfinished = set(futures)
+
+                    try:
+                        while unfinished:
+                            remaining_time = deadline - time.monotonic()
+                            if remaining_time <= 0:
+                                timed_out = True
+                                break
+
+                            done, unfinished = wait(
+                                unfinished,
+                                timeout=remaining_time,
+                                return_when=FIRST_COMPLETED,
+                            )
+                            if not done:
+                                timed_out = True
+                                break
+
+                            for future in done:
+                                seed_idx = futures[future]
+                                try:
+                                    result1, result2 = future.result()
+                                    resolve_duplicates += result1
+                                    resolve_duplicates_fail += result2
+                                    completed_count += 1
+                                except Exception as e:
+                                    print(f"# Error generating seed {seed_idx}: {e}")
+                                finally:
+                                    progress.update(1)
+
+                        if timed_out:
+                            for future in unfinished:
+                                seed_idx = futures[future]
+                                if future.cancel():
+                                    progress.update(1)
+                                timeout_count += 1
+                                print(f"# Seed {seed_idx} timed out ({timeout_seconds}s)")
+                                retry_seeds.append(seed_idx)
+                    finally:
+                        progress.close()
+                finally:
+                    if timed_out:
+                        _terminate_executor_workers(executor)
+                    executor.shutdown(wait=not timed_out, cancel_futures=True)
+
+            pending_seeds = retry_seeds
+            retry_round += 1
+
+        if pending_seeds:
+            print(
+                f"# {len(pending_seeds)} seeds failed after {max_retries} retry rounds, skipping"
+            )
 
         print(f"# Successfully generated: {completed_count}/{seed_times} seeds")
         print(f"# Total timeouts: {timeout_count}")
