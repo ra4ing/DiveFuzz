@@ -63,6 +63,18 @@ def execute_sequence_with_checkpoint(
         return False
 
 
+def is_rv32_supported_generated_instr(complete_instr: str) -> bool:
+    """
+    Check whether a generated instruction string avoids RV64-only CSR forms.
+    """
+    return (
+        not any(
+            rv32_not_support_csr in complete_instr
+            for rv32_not_support_csr in rv32_not_support_csrs
+        )
+    ) and ("minstret" not in complete_instr)
+
+
 def generate_forward_jump_instrs(
     jump_instr: str,
     target_distance: int,
@@ -75,7 +87,7 @@ def generate_forward_jump_instrs(
     instrs_filter: list,
     probabilities: list,
     allowed_extensions: list,
-    protected_regs: list = None,
+    protected_regs: list | None = None,
 ) -> List[str]:
     """
     Generate middle instructions for forward jump sequence.
@@ -242,7 +254,7 @@ def generate_instructions(
     out_dir: str,
     xor_cache_state: dict,
     architecture: str,
-    debug_config: dict = None,
+    debug_config: dict | None = None,
     bug_filter_enable: bool = True,
     jump_enable: bool = True,
 ):
@@ -265,12 +277,12 @@ def generate_instructions(
     # Create fresh template instance for this seed with random type and values
     # This ensures each seed gets independent random content (MSTATUS, register init, etc.)
     template = create_template_instance(arch, template_type)
+    spike_session = None
+    xor_cache = None
 
     try:
         # Initialize Spike session for eliminate mode (checkpoint-based validation)
-        spike_session = None
         validator = None
-        xor_cache = None
         if eliminate_enable and SPIKE_ENGINE_AVAILABLE:
             try:
                 # Generate NOP ELF template
@@ -471,18 +483,19 @@ def generate_instructions(
                     instrs_filter = [
                         instr for instr in instrs if not instr.startswith("c.")
                     ]
-                    if instrs_filter:
-                        instr = random.choice(instrs_filter)
-                    else:
-                        continue
-
                     if is_rv32:
-                        while instr in special_instr or instr in rv32_not_support_instr:
-                            instr = random.choice(instrs_filter)
+                        invalid_instrs = set(special_instr) | set(rv32_not_support_instr)
                     else:
-                        # twice filter insters
-                        while instr in special_instr:
-                            instr = random.choice(instrs_filter)
+                        invalid_instrs = set(special_instr)
+
+                    valid_instrs = [
+                        instr for instr in instrs_filter if instr not in invalid_instrs
+                    ]
+                    if valid_instrs:
+                        instr = random.choice(valid_instrs)
+                    else:
+                        total_instr_retry += 1
+                        continue
 
                     DIRECT_JUMP_INSTRS = {
                         "jal",
@@ -537,7 +550,9 @@ def generate_instructions(
                             )
 
                             # Construct loop components
-                            init_instr = f"li {counter_reg}, {loop_iterations}"
+                            # loop_iterations is 1..8, so use a real I-type
+                            # instruction instead of the `li` pseudo-instruction.
+                            init_instr = f"addi {counter_reg}, zero, {loop_iterations}"
                             decr_instr = f"addi {counter_reg}, {counter_reg}, -1"
                             branch_instr = f"bne {counter_reg}, zero, {{LABEL}}"
 
@@ -796,8 +811,9 @@ def generate_instructions(
                             while mutate_time < MAX_MUTATE_TIME:
                                 # Generate new instruction
                                 if is_rv32:
-                                    while True:
-                                        complete_instr = generate_new_instr(
+                                    complete_instr = None
+                                    for _ in range(MAX_MUTATE_TIME):
+                                        candidate_instr = generate_new_instr(
                                             instr,
                                             extension,
                                             rd_history,
@@ -805,13 +821,14 @@ def generate_instructions(
                                             frd_history,
                                             frs_history,
                                         )
-                                        if (
-                                            not any(
-                                                rv32_not_support_csr in complete_instr
-                                                for rv32_not_support_csr in rv32_not_support_csrs
-                                            )
-                                        ) and ("minstret" not in complete_instr):
+                                        if is_rv32_supported_generated_instr(
+                                            candidate_instr
+                                        ):
+                                            complete_instr = candidate_instr
                                             break
+                                    if complete_instr is None:
+                                        mutate_time = MAX_MUTATE_TIME
+                                        break
                                 else:
                                     complete_instr = generate_new_instr(
                                         instr,
@@ -857,8 +874,9 @@ def generate_instructions(
                         retry_count = 0
                         while retry_count < MAX_MUTATE_TIME:
                             if is_rv32:
-                                while True:
-                                    complete_instr = generate_new_instr(
+                                complete_instr = None
+                                for _ in range(MAX_MUTATE_TIME):
+                                    candidate_instr = generate_new_instr(
                                         instr,
                                         extension,
                                         rd_history,
@@ -866,13 +884,14 @@ def generate_instructions(
                                         frd_history,
                                         frs_history,
                                     )
-                                    if (
-                                        not any(
-                                            rv32_not_support_csr in complete_instr
-                                            for rv32_not_support_csr in rv32_not_support_csrs
-                                        )
-                                    ) and ("minstret" not in complete_instr):
+                                    if is_rv32_supported_generated_instr(
+                                        candidate_instr
+                                    ):
+                                        complete_instr = candidate_instr
                                         break
+                                if complete_instr is None:
+                                    retry_count += 1
+                                    continue
                             else:
                                 complete_instr = generate_new_instr(
                                     instr,
@@ -899,6 +918,9 @@ def generate_instructions(
 
                             # Instruction is valid, exit retry loop
                             break
+                        if retry_count >= MAX_MUTATE_TIME:
+                            total_instr_retry += 1
+                            continue
                         # In non-eliminate mode, assume each logical instruction = 4 bytes
                         # (pseudo-instruction expansion is not tracked without spike validation)
                         actual_bytes += 4
@@ -975,7 +997,7 @@ def generate_instructions(
         # Clean up Spike session
         if spike_session is not None:
             try:
-                spike_session.close()
+                spike_session.cleanup()
             except Exception:
                 pass
 

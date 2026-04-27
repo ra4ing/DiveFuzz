@@ -87,7 +87,7 @@ def generate_instructions_parallel(
     timeout_count = 0
 
     # The timeout period = the number of instructions * 0.8 seconds
-    timeout_seconds = instr_number * 0.05
+    timeout_seconds = instr_number * 0.005
     # Maximum retry count to prevent unlimited retries
     max_retries = 5
 

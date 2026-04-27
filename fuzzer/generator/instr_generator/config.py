@@ -20,6 +20,11 @@ special_instr = [
                 'c.sw', 'c.sd','c.fsw', 'c.fsd', \
                 'c.lwsp', 'c.swsp', 'c.lw', 'c.sw', 'c.ldsp', 'c.sdsp', 'c.ld', \
                 'c.sd', 'c.flw', 'c.flwsp', 'c.fldsp', 'c.fld', \
+                # Pseudo-instructions / not directly encodable random instructions.
+                # `li` is intentionally excluded from the random pool: real
+                # materialization instructions (lui/addi/addiw/slli/...) are
+                # generated directly instead of relying on assembler fallback.
+                'li', 'nop', 'frrm', 'fsrm', 'frflags', 'fsflags',
                 #'pack', 'packw', 'packh'
                 #'nop'
                 #'pack', 'packh', 'packw'
