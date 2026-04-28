@@ -69,19 +69,19 @@ def main():
             print(f"#   Output: {config.out_dir}/spike_debug_seed_*.log")
 
         generate_instructions_parallel(
-            config.instr_number,
-            config.seed_times,
-            config.eliminate_enable,
-            config.is_rv32,
-            config.max_workers,
-            config.arch,
-            config.template_type,
-            str(config.out_dir),
-            config.architecture,
-            debug_config,
-            config.stateful_xor_cache,
-            config.bug_filter_enable,
-            config.jump_enable,
+            instr_number=config.instr_number,
+            seed_times=config.seed_times,
+            eliminate_enable=config.eliminate_enable,
+            is_rv32=config.is_rv32,
+            max_workers=config.max_workers,
+            arch=config.arch,
+            template_type=config.template_type,
+            out_dir=str(config.out_dir),
+            architecture=config.architecture or "xs",
+            debug_config=debug_config,
+            use_stateful_cache=config.stateful_xor_cache,
+            bug_filter_enable=config.bug_filter_enable,
+            jump_enable=config.jump_enable,
         )
 
         # Write ISA info for downstream tools (e.g., spike runner)

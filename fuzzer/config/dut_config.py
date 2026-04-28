@@ -28,6 +28,7 @@ class DUTTarget:
     emu_path: str
     cmd: str
     threads: int = 0
+    timeout: int = 300
     
     def __post_init__(self):
         self.emu_path = os.path.expanduser(self.emu_path)

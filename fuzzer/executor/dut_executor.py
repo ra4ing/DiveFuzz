@@ -55,7 +55,7 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                timeout=300
+                timeout=dut_config.timeout
             )
             # Save output
             seed_logger.info(result.stdout)
@@ -83,7 +83,7 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
             )
             
         except subprocess.TimeoutExpired as e:
-            error_msg = f"Test timed out after 300 seconds: {seed_name}"
+            error_msg = f"Test timed out after {dut_config.timeout} seconds: {seed_name}"
             seed_logger.error(error_msg)
             return TestResult(
                 dut_name=dut_config.name,
@@ -91,7 +91,7 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
                 diff_ref=dut_config.diff_ref,
                 seed_name=seed_name,
                 result_type=ResultType.TIMEOUT,
-                summary="Timeout expired (300s)",
+                summary=f"Timeout expired ({dut_config.timeout}s)",
                 log_path=seed_log_path
             )
         except Exception as e:

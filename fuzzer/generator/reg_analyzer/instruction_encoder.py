@@ -86,14 +86,14 @@ class DefaultContextProvider:
         Args:
             default_frm: Default floating-point rounding mode (7 = dynamic)
         """
-        self._defaults = {
+        self._defaults: Dict[int, int] = {
             self.CSR_FRM: default_frm,
             self.CSR_FCSR: default_frm,  # frm is bits [7:5] of fcsr
         }
 
     def get_csr(self, addr: int) -> int:
         """Get CSR value, returns default or 0"""
-        return self._defaults.get(addr, 0)
+        return self._defaults.get(int(addr), 0)
 
 
 class InstructionEncoder:
@@ -126,10 +126,18 @@ class InstructionEncoder:
         'w': 1,  # Write (memory writes)
     }
 
+    _LOAD_STORE_PATTERN = re.compile(
+        r'^\s*(\w+(?:\.\w+)?)\s+(\w+)\s*,\s*(-?\d+(?:x[\da-fA-F]+)?)\s*\(\s*(\w+)\s*\)\s*$'
+    )
+    _AMO_PATTERN = re.compile(r'^\s*(\w+(?:\.\w+)*)\s+(\w+)\s*,\s*(\w+)\s*,\s*\(\s*(\w+)\s*\)\s*$')
+    _LR_PATTERN = re.compile(r'^\s*(lr\.\w+(?:\.\w+)*)\s+(\w+)\s*,\s*\(\s*(\w+)\s*\)\s*$', re.IGNORECASE)
+    _SC_PATTERN = re.compile(r'^\s*(sc\.\w+(?:\.\w+)*)\s+(\w+)\s*,\s*(\w+)\s*,\s*\(\s*(\w+)\s*\)\s*$', re.IGNORECASE)
+    _OPERAND_SPLIT_PATTERN = re.compile(r'[,\s]+')
+
     def __init__(
         self,
-        instr_dict_path: Optional[str] = None,
-        arg_lut_path: Optional[str] = None,
+        instr_dict_path: Optional[Union[str, Path]] = None,
+        arg_lut_path: Optional[Union[str, Path]] = None,
         context_provider: Optional[ContextProvider] = None
     ):
         """
@@ -615,8 +623,7 @@ class InstructionEncoder:
 
         # Check if it is the loading/storage instruction format: opcode rd, imm(rs1) or opcode rs2, imm(rs1) 
         # # Matching mode: Instruction name register, immediate number (register)
-        load_store_pattern = r'^\s*(\w+(?:\.\w+)?)\s+(\w+)\s*,\s*(-?\d+(?:x[\da-fA-F]+)?)\s*\(\s*(\w+)\s*\)\s*$'
-        match = re.match(load_store_pattern, asm_line)
+        match = self._LOAD_STORE_PATTERN.match(asm_line)
 
         if match:
             opcode = match.group(1).lower()
@@ -641,8 +648,7 @@ class InstructionEncoder:
             return opcode, operands
 
         # Check for AMO instruction format: opcode rd, rs2, (rs1)
-        amo_pattern = r'^\s*(\w+(?:\.\w+)*)\s+(\w+)\s*,\s*(\w+)\s*,\s*\(\s*(\w+)\s*\)\s*$'
-        amo_match = re.match(amo_pattern, asm_line)
+        amo_match = self._AMO_PATTERN.match(asm_line)
         if amo_match:
             opcode = amo_match.group(1).lower()
             rd = amo_match.group(2)
@@ -653,8 +659,7 @@ class InstructionEncoder:
             return opcode, [rd, rs1, rs2]
 
         # Check for LR instruction format: lr.w rd, (rs1)
-        lr_pattern = r'^\s*(lr\.\w+(?:\.\w+)*)\s+(\w+)\s*,\s*\(\s*(\w+)\s*\)\s*$'
-        lr_match = re.match(lr_pattern, asm_line, re.IGNORECASE)
+        lr_match = self._LR_PATTERN.match(asm_line)
         if lr_match:
             opcode = lr_match.group(1).lower()
             rd = lr_match.group(2)
@@ -662,8 +667,7 @@ class InstructionEncoder:
             return opcode, [rd, rs1]
 
         # Check for SC instruction format: sc.w rd, rs2, (rs1)
-        sc_pattern = r'^\s*(sc\.\w+(?:\.\w+)*)\s+(\w+)\s*,\s*(\w+)\s*,\s*\(\s*(\w+)\s*\)\s*$'
-        sc_match = re.match(sc_pattern, asm_line, re.IGNORECASE)
+        sc_match = self._SC_PATTERN.match(asm_line)
         if sc_match:
             opcode = sc_match.group(1).lower()
             rd = sc_match.group(2)
@@ -671,7 +675,7 @@ class InstructionEncoder:
             rs1 = sc_match.group(4)
             return opcode, [rd, rs1, rs2]
 
-        parts = re.split(r'[,\s]+', asm_line)
+        parts = self._OPERAND_SPLIT_PATTERN.split(asm_line)
         parts = [p.strip() for p in parts if p.strip()]
 
         if not parts:

@@ -267,9 +267,6 @@ class InstructionValidator:
                 return False, 0
 
         try:
-            if not self.spike_session.checkpoint_set:
-                self.spike_session.set_checkpoint()
-
             if self._debug_logger_enabled and self._debug_logger:
                 self._debug_logger.capture_pre_state(self.spike_session)
 

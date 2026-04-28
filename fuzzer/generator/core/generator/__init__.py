@@ -14,7 +14,7 @@
 import os
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from tqdm import tqdm
+from tqdm import tqdm  # pyright: ignore[reportMissingModuleSource]
 from .generate_instrs import generate_instructions
 from ...asm_template_manager.riscv_asm_syntex import ArchConfig
 from ...reg_analyzer.stateful_xor_cache import StatefulXORCache
@@ -51,7 +51,7 @@ def generate_instructions_parallel(
     out_dir: str = "out-seeds-2025-test",
     architecture: str = "xs",
     debug_config: dict | None = None,
-    stateful_xor_cache: bool = True,
+    use_stateful_cache: bool = True,
     bug_filter_enable: bool = True,
     jump_enable: bool = True,
 ):
@@ -87,7 +87,7 @@ def generate_instructions_parallel(
     timeout_count = 0
 
     # The timeout period = the number of instructions * 0.8 seconds
-    timeout_seconds = instr_number * 0.005
+    timeout_seconds = instr_number * 0.0005
     # Maximum retry count to prevent unlimited retries
     max_retries = 5
 
@@ -104,7 +104,7 @@ def generate_instructions_parallel(
         # Ensure output directory exists
         os.makedirs(out_dir, exist_ok=True)
 
-        use_stateful = stateful_xor_cache
+        use_stateful = use_stateful_cache
         if use_stateful:
             xor_cache = StatefulXORCache.create_for_workload(
                 num_seeds=seed_times,
@@ -172,10 +172,11 @@ def generate_instructions_parallel(
                             template_type,
                             out_dir,
                             xor_cache_state,
-                            architecture,
-                            debug_config,
-                            bug_filter_enable,
-                            jump_enable,
+                            use_stateful_cache=use_stateful_cache,
+                            architecture=architecture,
+                            debug_config=debug_config,
+                            bug_filter_enable=bug_filter_enable,
+                            jump_enable=jump_enable,
                         )
                         futures[future] = seed_idx
 

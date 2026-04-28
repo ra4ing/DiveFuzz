@@ -254,6 +254,8 @@ class StatefulXORCache(XORCache):
     ) -> bool:
         if context_type is None:
             context_type = get_instruction_context(opcode)
+        if context_type == InstructionContext.GENERAL:
+            return self.check_and_add(opcode, xor_value)
         context_fields = extract_context(context_type, spike_session)
         context_hash = compute_context_hash(context_fields)
         combined_value = self.compute_combined_hash(xor_value, context_hash)

@@ -383,6 +383,139 @@ class HybridEncoder:
 
         return opcode, operands
 
+    def _parse_x_register(self, register: str) -> int:
+        """Return integer register number for branch/jump operands."""
+        reg_num = self.encoder.reg_mapper.xpr_name_to_num(register)
+        if reg_num is None:
+            raise ValueError(f"Invalid integer register: {register}")
+        return reg_num
+
+    def _parse_compressed_register(self, register: str) -> int:
+        """Return compressed register index (0-7) for x8-x15 operands."""
+        reg_num = self._parse_x_register(register)
+        if not 8 <= reg_num <= 15:
+            raise ValueError(f"Compressed branch register must be x8-x15: {register}")
+        return reg_num - 8
+
+    def _validate_jump_offset(self, offset: int, bits: int, opcode: str) -> None:
+        """Validate a signed PC-relative jump offset before bit packing."""
+        lower_bound = -(1 << (bits - 1))
+        upper_bound = 1 << (bits - 1)
+        if offset % 2 != 0:
+            raise ValueError(f"{opcode} offset must be 2-byte aligned: {offset}")
+        if not lower_bound <= offset < upper_bound:
+            raise ValueError(
+                f"{opcode} offset {offset} out of range [{lower_bound}, {upper_bound - 2}]"
+            )
+
+    def _encode_b_type_jump(self, opcode: str, rs1: str, rs2: str, offset: int) -> int:
+        """Encode B-type branch using the RISC-V immediate bit layout."""
+        self._validate_jump_offset(offset, 13, opcode)
+        funct3_by_opcode = {
+            'beq': 0b000,
+            'bne': 0b001,
+            'blt': 0b100,
+            'bge': 0b101,
+            'bltu': 0b110,
+            'bgeu': 0b111,
+        }
+        imm = offset & 0x1FFF
+        rs1_num = self._parse_x_register(rs1)
+        rs2_num = self._parse_x_register(rs2)
+
+        return (
+            ((imm >> 12) & 0x1) << 31
+            | ((imm >> 5) & 0x3F) << 25
+            | (rs2_num & 0x1F) << 20
+            | (rs1_num & 0x1F) << 15
+            | (funct3_by_opcode[opcode] & 0x7) << 12
+            | ((imm >> 1) & 0xF) << 8
+            | ((imm >> 11) & 0x1) << 7
+            | 0b1100011
+        )
+
+    def _encode_j_type_jump(self, rd: str, offset: int) -> int:
+        """Encode jal using the RISC-V J-type immediate bit layout."""
+        self._validate_jump_offset(offset, 21, 'jal')
+        imm = offset & 0x1FFFFF
+        rd_num = self._parse_x_register(rd)
+
+        return (
+            ((imm >> 20) & 0x1) << 31
+            | ((imm >> 1) & 0x3FF) << 21
+            | ((imm >> 11) & 0x1) << 20
+            | ((imm >> 12) & 0xFF) << 12
+            | (rd_num & 0x1F) << 7
+            | 0b1101111
+        )
+
+    def _encode_compressed_jump(self, opcode: str, offset: int) -> int:
+        """Encode c.j/c.jal using the compressed jump immediate layout."""
+        self._validate_jump_offset(offset, 12, opcode)
+        imm = offset & 0xFFF
+        match = 0xA001 if opcode == 'c.j' else 0x2001
+
+        return (
+            match
+            | ((imm >> 11) & 0x1) << 12
+            | ((imm >> 4) & 0x1) << 11
+            | ((imm >> 8) & 0x3) << 9
+            | ((imm >> 10) & 0x1) << 8
+            | ((imm >> 6) & 0x1) << 7
+            | ((imm >> 7) & 0x1) << 6
+            | ((imm >> 1) & 0x7) << 3
+            | ((imm >> 5) & 0x1) << 2
+        )
+
+    def _encode_compressed_branch(self, opcode: str, rs1: str, offset: int) -> int:
+        """Encode c.beqz/c.bnez using the compressed branch immediate layout."""
+        self._validate_jump_offset(offset, 9, opcode)
+        imm = offset & 0x1FF
+        match = 0xC001 if opcode == 'c.beqz' else 0xE001
+        rs1_prime = self._parse_compressed_register(rs1)
+
+        return (
+            match
+            | ((imm >> 8) & 0x1) << 12
+            | ((imm >> 3) & 0x3) << 10
+            | (rs1_prime & 0x7) << 7
+            | ((imm >> 6) & 0x3) << 5
+            | ((imm >> 1) & 0x3) << 3
+            | ((imm >> 5) & 0x1) << 2
+        )
+
+    def _encode_forward_jump(self, opcode: str, operands: List[str], offset: int) -> Tuple[int, int, str]:
+        """
+        Encode forward branches/jumps without invoking assembler fallback.
+
+        Returns:
+            (machine_code, instruction_size, formatted_assembly)
+        """
+        offset_str = self._format_offset(offset)
+
+        if opcode in {'beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu'}:
+            if len(operands) < 2:
+                raise ValueError(f"B-type branch requires 2 registers: {opcode}")
+            jump_asm = f"{opcode} {operands[0]}, {operands[1]}, {offset_str}"
+            return self._encode_b_type_jump(opcode, operands[0], operands[1], offset), 4, jump_asm
+
+        if opcode == 'jal':
+            rd = operands[0] if operands else 'ra'
+            jump_asm = f"{opcode} {rd}, {offset_str}"
+            return self._encode_j_type_jump(rd, offset), 4, jump_asm
+
+        if opcode in {'c.beqz', 'c.bnez'}:
+            if not operands:
+                raise ValueError(f"Compressed branch requires rs1 operand: {opcode}")
+            jump_asm = f"{opcode} {operands[0]}, {offset_str}"
+            return self._encode_compressed_branch(opcode, operands[0], offset), 2, jump_asm
+
+        if opcode in {'c.j', 'c.jal'}:
+            jump_asm = f"{opcode} {offset_str}"
+            return self._encode_compressed_jump(opcode, offset), 2, jump_asm
+
+        raise ValueError(f"Unsupported jump opcode: {opcode}")
+
     def compile_forward_jump(
         self,
         jump_instr: str,
@@ -424,42 +557,14 @@ class HybridEncoder:
         # Step 4: Calculate correct offset: jump_size + middle_total
         # This is the distance from the branch instruction PC to the label
         correct_offset = jump_size + middle_total
-        offset_str = self._format_offset(correct_offset)
 
-        # Step 5: Build jump instruction with correct offset
-        if opcode in {'beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu'}:
-            if len(operands) >= 2:
-                jump_asm = f"{opcode} {operands[0]}, {operands[1]}, {offset_str}"
-            else:
-                raise ValueError(f"B-type branch requires 2 registers: {jump_instr}")
-        elif opcode in {'jal'}:
-            rd = operands[0] if operands else 'ra'
-            jump_asm = f"{opcode} {rd}, {offset_str}"
-        elif opcode in {'c.beqz', 'c.bnez'}:
-            jump_asm = f"{opcode} {operands[0]}, {offset_str}"
-        elif opcode in {'c.j', 'c.jal'}:
-            jump_asm = f"{opcode} {offset_str}"
-        else:
-            raise ValueError(f"Unsupported jump opcode: {opcode}")
-
-        jump_code, actual_jump_size = self._encode_with_size(jump_asm)
-
-        # Verify size assumption matches actual encoded size
-        if actual_jump_size != jump_size:
-            # Recalculate with actual size if assumption was wrong
-            correct_offset = actual_jump_size + middle_total
-            offset_str = self._format_offset(correct_offset)
-            # Re-encode with correct offset
-            if opcode in {'beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu'}:
-                jump_asm = f"{opcode} {operands[0]}, {operands[1]}, {offset_str}"
-            elif opcode in {'jal'}:
-                rd = operands[0] if operands else 'ra'
-                jump_asm = f"{opcode} {rd}, {offset_str}"
-            elif opcode in {'c.beqz', 'c.bnez'}:
-                jump_asm = f"{opcode} {operands[0]}, {offset_str}"
-            elif opcode in {'c.j', 'c.jal'}:
-                jump_asm = f"{opcode} {offset_str}"
-            jump_code, actual_jump_size = self._encode_with_size(jump_asm)
+        # Step 5: Encode jump directly. This avoids InstructionEncoder parsing
+        # ". + N" as separate tokens and falling back to RiscvCompiler subprocesses.
+        jump_code, actual_jump_size, jump_asm = self._encode_forward_jump(
+            opcode,
+            operands,
+            correct_offset,
+        )
 
         # Build result
         codes = [jump_code] + middle_codes
@@ -517,24 +622,26 @@ class HybridEncoder:
         decr_sizes = [s for c, s in decr_seq]
         decr_total = sum(decr_sizes)
 
-        # Step 4: Calculate backward offset and compile branch
-        # Offset is negative: -(body_size + decr_size)
+        # Step 4: Calculate backward offset and compile branch directly
+        # (same approach as compile_forward_jump to avoid ". - N" parsing fallback)
         backward_offset = -(body_total + decr_total)
 
         opcode, operands = self._parse_branch_instruction(branch_instr)
-        offset_str = self._format_offset(backward_offset)
 
         if opcode in {'beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu'}:
-            if len(operands) >= 2:
-                branch_asm = f"{opcode} {operands[0]}, {operands[1]}, {offset_str}"
-            else:
+            if len(operands) < 2:
                 raise ValueError(f"B-type branch requires 2 registers: {branch_instr}")
+            branch_code, branch_size, branch_asm = self._encode_b_type_jump(
+                opcode, operands[0], operands[1], backward_offset
+            ), 4, f"{opcode} {operands[0]}, {operands[1]}, {self._format_offset(backward_offset)}"
         elif opcode in {'c.beqz', 'c.bnez'}:
-            branch_asm = f"{opcode} {operands[0]}, {offset_str}"
+            if not operands:
+                raise ValueError(f"Compressed branch requires rs1 operand: {branch_instr}")
+            branch_code = self._encode_compressed_branch(opcode, operands[0], backward_offset)
+            branch_size = 2
+            branch_asm = f"{opcode} {operands[0]}, {self._format_offset(backward_offset)}"
         else:
             raise ValueError(f"Unsupported branch opcode for loop: {opcode}")
-
-        branch_code, branch_size = self._encode_with_size(branch_asm)
 
         # Build result
         codes = init_codes + body_codes + decr_codes + [branch_code]

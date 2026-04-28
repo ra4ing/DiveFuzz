@@ -24,3 +24,4 @@ from .generator import (
     gen_imm,
     generate_random_v_instruction,
 )
+from .const_materializer import materialize_const, sign_extend

@@ -74,6 +74,14 @@ class FilterRegistry:
         # Filter name to filter mapping (for quick lookup)
         self._name_to_filter: Dict[str, PrecisionFilter] = {}
 
+        # Inverted index: opcode -> [filters that apply to that opcode]
+        # Exact-match opcodes are indexed directly; wildcard/prefix patterns
+        # and empty-opcode (match-all) filters are kept in separate lists.
+        self._pre_opcode_index: Dict[str, List[PreExecutionFilter]] = {}
+        self._pre_wildcard_filters: List[PreExecutionFilter] = []
+        self._post_opcode_index: Dict[str, List[PostExecutionFilter]] = {}
+        self._post_wildcard_filters: List[PostExecutionFilter] = []
+
     # =========================================================================
     # Registration
     # =========================================================================
@@ -106,7 +114,25 @@ class FilterRegistry:
         # Add to name mapping
         self._name_to_filter[filter.name] = filter
 
+        self._index_filter(filter)
+
         return self
+
+    def _index_filter(self, filter: PrecisionFilter) -> None:
+        is_pre = filter.phase == FilterPhase.PRE_EXECUTION
+        opcode_index = self._pre_opcode_index if is_pre else self._post_opcode_index
+        wildcard_list = self._pre_wildcard_filters if is_pre else self._post_wildcard_filters
+
+        if not filter.opcodes:
+            wildcard_list.append(filter)
+            return
+
+        for pattern in filter.opcodes:
+            pattern_lower = pattern.lower()
+            if pattern_lower == "*" or pattern_lower.endswith("*"):
+                wildcard_list.append(filter)
+            else:
+                opcode_index.setdefault(pattern_lower, []).append(filter)
 
     def register_all(self, filters: List[PrecisionFilter]) -> "FilterRegistry":
         """
@@ -141,6 +167,25 @@ class FilterRegistry:
             self._pre_filters = [f for f in self._pre_filters if f.name != name]
         else:
             self._post_filters = [f for f in self._post_filters if f.name != name]
+
+        is_pre = filter.phase == FilterPhase.PRE_EXECUTION
+        opcode_index = self._pre_opcode_index if is_pre else self._post_opcode_index
+        wildcard_list = self._pre_wildcard_filters if is_pre else self._post_wildcard_filters
+
+        if not filter.opcodes:
+            wildcard_list[:] = [f for f in wildcard_list if f.name != name]
+        else:
+            for pattern in filter.opcodes:
+                pattern_lower = pattern.lower()
+                if pattern_lower == "*" or pattern_lower.endswith("*"):
+                    wildcard_list[:] = [f for f in wildcard_list if f.name != name]
+                else:
+                    if pattern_lower in opcode_index:
+                        opcode_index[pattern_lower] = [
+                            f for f in opcode_index[pattern_lower] if f.name != name
+                        ]
+                        if not opcode_index[pattern_lower]:
+                            del opcode_index[pattern_lower]
 
         return filter
 
@@ -204,24 +249,24 @@ class FilterRegistry:
         """
         Execute all applicable pre-execution filters.
 
-        Filters are executed in priority order until one rejects
-        or all pass.
-
-        Args:
-            ctx: Execution context (s_post will be None)
-
-        Returns:
-            Rejection reason if instruction should be filtered, None if accepted
+        Uses inverted index for O(1) lookup of exact-match filters,
+        then checks wildcard/prefix filters linearly (much smaller set).
         """
-        for filter in self._pre_filters:
-            # Check if filter applies
-            if not filter.should_apply(ctx):
+        opcode_lower = ctx.opcode.lower()
+
+        for filter in self._pre_opcode_index.get(opcode_lower, []):
+            if not filter.enabled:
                 continue
-
-            # Execute filter
             result = filter.check(ctx)
+            if result.should_filter:
+                return result.reason or filter.name
 
-            # Return on first rejection
+        for filter in self._pre_wildcard_filters:
+            if not filter.enabled:
+                continue
+            if not filter.applies_to_opcode(opcode_lower):
+                continue
+            result = filter.check(ctx)
             if result.should_filter:
                 return result.reason or filter.name
 
@@ -231,24 +276,24 @@ class FilterRegistry:
         """
         Execute all applicable post-execution filters.
 
-        Filters are executed in priority order until one rejects
-        or all pass.
-
-        Args:
-            ctx: Execution context (s_post should be populated)
-
-        Returns:
-            Rejection reason if instruction should be filtered, None if accepted
+        Uses inverted index for O(1) lookup of exact-match filters,
+        then checks wildcard/prefix filters linearly (much smaller set).
         """
-        for filter in self._post_filters:
-            # Check if filter applies
-            if not filter.should_apply(ctx):
+        opcode_lower = ctx.opcode.lower()
+
+        for filter in self._post_opcode_index.get(opcode_lower, []):
+            if not filter.enabled:
                 continue
-
-            # Execute filter
             result = filter.check(ctx)
+            if result.should_filter:
+                return result.reason or filter.name
 
-            # Return on first rejection
+        for filter in self._post_wildcard_filters:
+            if not filter.enabled:
+                continue
+            if not filter.applies_to_opcode(opcode_lower):
+                continue
+            result = filter.check(ctx)
             if result.should_filter:
                 return result.reason or filter.name
 

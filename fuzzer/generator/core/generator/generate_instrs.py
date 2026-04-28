@@ -14,7 +14,7 @@
 import os
 import re
 import random
-import numpy as np
+import numpy as np  # pyright: ignore[reportMissingImports]
 from pathlib import Path
 from typing import List
 from ...asm_template_manager import (
@@ -32,12 +32,13 @@ from ...instr_generator import (
     # generate_random_vsetvli_instruction,
     get_instruction_format,
     generate_new_instr,
+    gen_imm,
+    materialize_const,
     reg_range,
 )
 from ...reg_analyzer.nop_template_gen import generate_nop_elf, NOP_REDUNDANCY
 from ...reg_analyzer.spike_session import SpikeSession, SPIKE_ENGINE_AVAILABLE
 from ...reg_analyzer.instruction_validator import InstructionValidator
-from ...reg_analyzer.stateful_xor_cache import StatefulXORCache as XORCache
 from ...reg_analyzer.hybrid_encoder import HybridEncoder
 from ...utils import list2str
 from .register_history import RegisterHistory
@@ -45,6 +46,9 @@ from ...instr_generator.label_manager import LabelManager
 from ...config.config_manager import MAX_MUTATE_TIME
 from ...bug_filter import create_registry_for_architecture
 from ...bug_filter.arch import register_architecture_filters
+
+
+V_INSTR_INIT = "vsetvli zero, zero, e8, m1, ta, ma"
 
 
 def execute_sequence_with_checkpoint(
@@ -61,6 +65,42 @@ def execute_sequence_with_checkpoint(
         except Exception:
             pass
         return False
+
+
+def encode_instruction_sequence(encoder, instructions: List[str]) -> tuple[List[int], List[int]]:
+    """Encode a list of real instructions into machine codes and sizes."""
+    codes = []
+    sizes = []
+    for instruction in instructions:
+        encoded = encoder.encode_sequence(instruction)
+        codes.extend(code for code, _ in encoded)
+        sizes.extend(size for _, size in encoded)
+    return codes, sizes
+
+
+def maybe_generate_const_materialization(
+    extension: str,
+    valid_instrs: list,
+    is_rv32: bool,
+) -> tuple[str, list[str]] | None:
+    """
+    Preserve the old random `li` slot as a real-instruction constant load event.
+
+    `li` stays in special_instr and is not sampled as an opcode.  When RV_I is
+    selected, this gives the excluded `li` one virtual slot among the remaining
+    valid RV_I opcodes and expands it immediately into real instructions.
+    """
+    if extension != "RV_I":
+        return None
+    if random.randrange(len(valid_instrs) + 1) != len(valid_instrs):
+        return None
+
+    writable_regs = [reg for reg in reg_range if reg not in ("zero", "x0")]
+    rd = random.choice(writable_regs)
+    imm_type = "IMM_32" if is_rv32 else "IMM_40"
+    imm = int(gen_imm(imm_type, 1))
+    instrs = materialize_const(rd, imm, 32 if is_rv32 else 64)
+    return rd, instrs
 
 
 def is_rv32_supported_generated_instr(complete_instr: str) -> bool:
@@ -112,7 +152,7 @@ def generate_forward_jump_instrs(
     }
 
     for _ in range(target_distance):
-        ext = np.random.choice(allowed_extensions, p=probabilities)
+        ext = random.choices(allowed_extensions, weights=probabilities, k=1)[0]
 
         if ext not in INSTRUCTION_FORMATS:
             continue
@@ -192,7 +232,7 @@ def generate_loop_body_instrs(
     }
 
     for _ in range(target_distance):
-        ext = np.random.choice(allowed_extensions, p=probabilities)
+        ext = random.choices(allowed_extensions, weights=probabilities, k=1)[0]
 
         if ext not in INSTRUCTION_FORMATS:
             continue
@@ -257,6 +297,7 @@ def generate_instructions(
     debug_config: dict | None = None,
     bug_filter_enable: bool = True,
     jump_enable: bool = True,
+    use_stateful_cache: bool = True,
 ):
     """
     Generate random RISC-V instructions for a single seed.
@@ -272,6 +313,7 @@ def generate_instructions(
         xor_cache_state: Serialized XORCache state from Master (via get_state_for_worker)
         architecture: Architecture for bug filtering ('xs', 'nts', 'rkt', 'kmh')
         debug_config: Debug configuration dict (see generate_instructions_parallel)
+        use_stateful_cache: Use StatefulXORCache when True, plain XORCache when False
     """
 
     # Create fresh template instance for this seed with random type and values
@@ -279,6 +321,13 @@ def generate_instructions(
     template = create_template_instance(arch, template_type)
     spike_session = None
     xor_cache = None
+
+    if use_stateful_cache:
+        from ...reg_analyzer.stateful_xor_cache import (
+            StatefulXORCache as XORCacheClass,
+        )
+    else:
+        from ...reg_analyzer.xor_cache import XORCache as XORCacheClass
 
     try:
         # Initialize Spike session for eliminate mode (checkpoint-based validation)
@@ -298,14 +347,19 @@ def generate_instructions(
                 if spike_session.initialize():
                     # Attach to shared XOR cache from Master process
                     if xor_cache_state is not None:
-                        xor_cache = XORCache.from_worker_state(xor_cache_state)
+                        xor_cache = XORCacheClass.from_worker_state(xor_cache_state)
                     else:
                         raise RuntimeError("XOR cache state is None")
 
-                    # Create validator with precision filter registry
                     encoder = HybridEncoder(quiet=True)
-                    precision_registry = create_registry_for_architecture(architecture)
-                    register_architecture_filters(architecture, precision_registry)
+                    precision_registry = None
+                    if bug_filter_enable:
+                        precision_registry = create_registry_for_architecture(
+                            architecture
+                        )
+                        register_architecture_filters(
+                            architecture, precision_registry
+                        )
                     validator = InstructionValidator(
                         spike_session=spike_session,
                         xor_cache=xor_cache,
@@ -426,7 +480,7 @@ def generate_instructions(
 
         if v_ext_enable:
             # v_instr_init
-            entire_instrs.append(v_instr_init)
+            entire_instrs.append(V_INSTR_INIT)
 
         # Maximum bytes in NOP template's main region
         # Each nop is 4 bytes, so total = (instr_number + NOP_REDUNDANCY) * 4
@@ -452,7 +506,9 @@ def generate_instructions(
             is_c_extension = False
 
             # Unified extension selection based on configuration and probabilities
-            extension = np.random.choice(allowed_ext.allowed_ext, p=probabilities)
+            extension = random.choices(
+                allowed_ext.allowed_ext, weights=probabilities, k=1
+            )[0]
 
             if extension == "RV64_C" or extension == "RV_C":
                 c_instr_consecutive_number += 1
@@ -492,6 +548,47 @@ def generate_instructions(
                         instr for instr in instrs_filter if instr not in invalid_instrs
                     ]
                     if valid_instrs:
+                        const_materialization = maybe_generate_const_materialization(
+                            extension,
+                            valid_instrs,
+                            is_rv32,
+                        )
+                        if const_materialization is not None:
+                            const_rd, const_instrs = const_materialization
+                            const_actual_bytes = len(const_instrs) * 4
+                            codes = []
+                            sizes = []
+
+                            if encoder is not None:
+                                try:
+                                    codes, sizes = encode_instruction_sequence(
+                                        encoder, const_instrs
+                                    )
+                                    const_actual_bytes = sum(sizes)
+                                except Exception:
+                                    total_instr_retry += 1
+                                    continue
+
+                            if actual_bytes + const_actual_bytes > max_bytes:
+                                total_instr_retry += 1
+                                continue
+
+                            if eliminate_enable and spike_session is not None:
+                                if not codes or not sizes:
+                                    total_instr_retry += 1
+                                    continue
+                                if not execute_sequence_with_checkpoint(
+                                    spike_session, codes, sizes
+                                ):
+                                    total_instr_retry += 1
+                                    continue
+
+                            entire_instrs.extend(const_instrs)
+                            rd_history.use_register(const_rd)
+                            actual_bytes += const_actual_bytes
+                            logical_instr_index += 1
+                            continue
+
                         instr = random.choice(valid_instrs)
                     else:
                         total_instr_retry += 1
@@ -716,6 +813,7 @@ def generate_instructions(
                         )
 
                         # Construct jump instruction
+                        jump_instr_str = ""
                         if instr == "jalr":
                             rd = random.choice(reg_range)
                             jump_instr_str = f"jalr {rd}, 0({chosen_reg})"
@@ -724,6 +822,9 @@ def generate_instructions(
                             jump_instr_str = f"c.jr {chosen_reg}"
                         elif instr == "c.jalr":
                             jump_instr_str = f"c.jalr {chosen_reg}"
+                        else:
+                            total_instr_retry += 1
+                            continue
 
                         rs_history.use_register(chosen_reg)
 

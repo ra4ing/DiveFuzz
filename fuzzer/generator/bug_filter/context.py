@@ -47,6 +47,7 @@ class _LazyPreState:
         "_res_loaded",
         "_csrs",
         "_csr_cache",
+        "_csr_all_loaded",
         "_vector_state",
         "_vec_loaded",
     )
@@ -66,6 +67,7 @@ class _LazyPreState:
         self._res_loaded: bool = False
         self._csrs: Optional[Dict[int, int]] = None
         self._csr_cache: Dict[int, int] = {}
+        self._csr_all_loaded: bool = False
         self._vector_state: Any = None
         self._vec_loaded: bool = False
 
@@ -153,6 +155,7 @@ class _LazyPreState:
         if self._csrs is None:
             self._csrs = dict(self._ss.get_all_csrs())
             self._csr_cache.update(self._csrs)
+            self._csr_all_loaded = True
         return self._csrs
 
 
@@ -183,6 +186,7 @@ class _LazyPostState:
         "_res_loaded",
         "_csr_cache",
         "_csrs",
+        "_csr_all_loaded",
         "_vector_state",
         "_vec_loaded",
     )
@@ -213,6 +217,7 @@ class _LazyPostState:
         self._res_loaded: bool = False
         self._csr_cache: Dict[int, int] = {}
         self._csrs: Optional[Dict[int, int]] = None
+        self._csr_all_loaded: bool = False
         self._vector_state: Any = None
         self._vec_loaded: bool = False
 
@@ -363,6 +368,7 @@ class _LazyPostState:
         if self._csrs is None:
             self._csrs = dict(self._ss.get_all_csrs())
             self._csr_cache.update(self._csrs)
+            self._csr_all_loaded = True
         return self._csrs
 
     @property
