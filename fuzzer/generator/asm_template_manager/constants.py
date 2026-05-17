@@ -80,6 +80,8 @@ SYM_REGION0           = "region_0"
 SYM_AMO0              = "amo_0"
 SYM_MEM_REGION        = "mem_region"
 SYM_MEM_REGION_END    = "mem_region_end"
+SYM_STACK_REGION      = "stack_region"
+SYM_STACK_REGION_END  = "stack_region_end"
 
 # Additional labels for S-mode and U-mode templates
 LBL_PMP_SETUP         = "pmp_setup"

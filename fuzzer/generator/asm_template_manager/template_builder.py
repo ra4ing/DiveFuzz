@@ -19,38 +19,149 @@ from .riscv_asm_syntex import AsmProgram, ArchConfig, CSR, Instruction, Comment,
 from .constants import *
 from .template_instance import TemplateInstance
 from .constants import TemplateType, HOOK_MAIN
+from .value_pools import (
+    DataType, PoolConfig, ValuePool, ValuePoolConfig,
+    MemWordConfig, MemWordValuePool,
+    create_all_pools as _create_all_pools,
+)
 import random
+
+# Module-level value pools.  Instantiated once so distribution holds across
+# all seeds in a run.  Override via configure_value_pools().
+_gpr_pool   = ValuePool(DataType.GPR_64)
+_fpr16_pool = ValuePool(DataType.FPR_16)
+_fpr32_pool = ValuePool(DataType.FPR_32)
+_fpr64_pool = ValuePool(DataType.FPR_64)
+_mem_pool: MemWordValuePool = MemWordValuePool(
+    category_config=PoolConfig(regular=0.35, boundary=0.20, extreme=0.20, exceptional=0.25),
+    semantic_config=MemWordConfig(),
+)
+
+
+def configure_value_pools(config: ValuePoolConfig) -> None:
+    """Replace module-level pools with fresh instances using *config*.
+
+    Call this before any template building to customise category
+    distributions (REGULAR / BOUNDARY / EXTREME / EXCEPTIONAL).
+    """
+    global _gpr_pool, _fpr16_pool, _fpr32_pool, _fpr64_pool, _mem_pool
+    pools = _create_all_pools(config)
+    _gpr_pool   = pools[DataType.GPR_64]
+    _fpr16_pool = pools[DataType.FPR_16]
+    _fpr32_pool = pools[DataType.FPR_32]
+    _fpr64_pool = pools[DataType.FPR_64]
+    _mem_pool   = pools[DataType.MEM_WORD]
+
+
+def _gen_gpr_value() -> int:
+    """Return a 64-bit integer suitable for loading into a GPR."""
+    return _gpr_pool.sample()
+
+
+def _gen_fpr_value(op: str) -> int:
+    """Return a 64-bit integer whose lower bits encode an IEEE 754 value.
+
+    *op* is one of ``"fmv.h.x"``, ``"fmv.w.x"``, ``"fmv.d.x"`` and
+    determines which format (binary16 / binary32 / binary64) the bits
+    represent.
+    """
+    if op == "fmv.h.x":
+        return _fpr16_pool.sample()
+    elif op == "fmv.w.x":
+        return _fpr32_pool.sample()
+    else:  # fmv.d.x
+        return _fpr64_pool.sample()
+
+
+def _gen_mem_word() -> int:
+    """Return a 32-bit integer suitable for a .word directive."""
+    return _mem_pool.sample()
+
+
+# ==============================================================================
+# Private Helper Functions (Internal Use Only)
 # ==============================================================================
 # Private Helper Functions (Internal Use Only)
 # ==============================================================================
 
 
-def _init_random_mem_region(p: AsmProgram, total_bytes: int = 8192, random_bytes: int = 1024) -> AsmProgram:
+def _write_random_words(p: AsmProgram, random_bytes: int) -> AsmProgram:
+    """
+    Emit random 32-bit words for a byte count that is word aligned.
+    """
+    if random_bytes % 4 != 0:
+        raise ValueError(f"random_bytes must be 4-byte aligned, got {random_bytes}")
+
+    random_words = random_bytes // 4
+    for i in range(0, random_words, 8):
+        batch_size = min(8, random_words - i)
+        words = [f"0x{_gen_mem_word():08x}" for _ in range(batch_size)]
+        p.data_word(*words)
+
+    return p
+
+
+def _init_random_mem_region(
+    p: AsmProgram,
+    total_bytes: int = 8192,
+    random_bytes: int = 4096,
+    random_offset: int = 2048,
+) -> AsmProgram:
     """
     Initialize memory region with random data for fuzzing diversity.
 
     Args:
         p: AsmProgram to add data to
         total_bytes: Total size of memory region (default 8192 = 8KB)
-        random_bytes: Number of bytes to randomize (default 1024 = 1KB)
-                     The rest will be zero-initialized for efficiency.
+        random_bytes: Number of bytes to randomize (default 4096 = 4KB)
+        random_offset: Start offset of the randomized window.
 
-    The random portion provides diversity for Load/Store operations,
-    while the zero portion keeps file size manageable.
+    T6 points at mem_region + 4096 and signed IMM_12 load/store instructions
+    can reach mem_region + 2048 through mem_region + 6143.  Randomizing that
+    reachable window ensures T6-based integer, floating-point, and atomic
+    memory operations observe diverse initialized values.
     """
-    # Generate random 32-bit words for the random portion
-    random_words = random_bytes // 4  # 4 bytes per word
-    for i in range(0, random_words, 8):
-        # Generate 8 words at a time for more compact output
-        batch_size = min(8, random_words - i)
-        words = [f"0x{random.getrandbits(32):08x}" for _ in range(batch_size)]
-        p.data_word(*words)
+    if random_offset < 0 or random_bytes < 0:
+        raise ValueError("random_offset and random_bytes must be non-negative")
+    if random_offset + random_bytes > total_bytes:
+        raise ValueError(
+            f"random window [{random_offset}, {random_offset + random_bytes}) exceeds "
+            f"total_bytes={total_bytes}"
+        )
 
-    # Fill remaining with zeros
-    remaining_bytes = total_bytes - random_bytes
-    if remaining_bytes > 0:
+    if random_offset > 0:
+        p.data_zero(random_offset)
+
+    _write_random_words(p, random_bytes)
+
+    remaining_bytes = total_bytes - random_offset - random_bytes
+    if remaining_bytes:
         p.data_zero(remaining_bytes)
 
+    return p
+
+
+def _init_random_stack_region(p: AsmProgram, total_bytes: int = 1024) -> AsmProgram:
+    """
+    Initialize the compressed-SP memory window with random data.
+
+    Generated c.*sp memory instructions use unsigned positive offsets, so the
+    generator locally points sp at stack_region before each such instruction.
+    Randomizing the full 1KB region covers all supported c.*sp offsets.
+    """
+    _write_random_words(p, total_bytes)
+    return p
+
+
+def _init_stack_region_section(p: AsmProgram) -> AsmProgram:
+    """
+    Define the data region used by generated c.*sp memory instructions.
+    """
+    p.section(".stack_region", flags="aw", sect_type="@progbits")
+    p.align(4)
+    p.label(SYM_STACK_REGION)
+    _init_random_stack_region(p)
+    p.label(SYM_STACK_REGION_END)
     return p
 
 
@@ -191,16 +302,16 @@ def _xs_init_reg(p: AsmProgram) -> AsmProgram:
     # Phase 1: Initialize x1-x31 with random values
     # We use a specific pattern to ensure all registers get initialized
     for r in range(1, 16):
-        rand_val = random.getrandbits(64)
+        rand_val = _gen_gpr_value()
         p.li(f"x{r}", f"0x{rand_val:016x}")
 
     # Phase 2: Initialize f0-f31 using the initialized x registers
     # Use x5 (t0) as temp since it's already initialized
     for r in range(12):
-        rand_val = random.getrandbits(64)
-        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         # choose a random fmv instruction: h.x / w.x / d.x
         op = random.choice(["fmv.h.x", "fmv.w.x", "fmv.d.x"])
+        rand_val = _gen_fpr_value(op)
+        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         p.instr(op, f"f{r}", "x5")
 
     # To Store/Load - use valid memory region address
@@ -229,7 +340,7 @@ def _nutshell_init_reg(p: AsmProgram) -> AsmProgram:
     # === General-purpose register initialization ===
     # Initialize ALL x1-x31 (x0 is hardwired to 0)
     for r in range(1, 32):
-        rand_val = random.getrandbits(64)
+        rand_val = _gen_gpr_value()
         p.li(f"x{r}", f"0x{rand_val:016x}")
 
     # To Store/Load - use valid memory region address
@@ -286,7 +397,7 @@ def _init_data_sections(p: AsmProgram) -> AsmProgram:
 
     p.section(".region_0", flags="aw", sect_type="@progbits")
     p.label(SYM_REGION0)
-    rand_words = [f"0x{random.getrandbits(32):08x}" for _ in range(8)]
+    rand_words = [f"0x{_gen_mem_word():08x}" for _ in range(8)]
     p.data_word(*rand_words)
 
     # Add mem_region for NutShell compatibility
@@ -295,6 +406,7 @@ def _init_data_sections(p: AsmProgram) -> AsmProgram:
     p.label(SYM_MEM_REGION)
     _init_random_mem_region(p)  # Initialize with random data for fuzzing diversity
     p.label(SYM_MEM_REGION_END)
+    _init_stack_region_section(p)
 
     return p
 
@@ -607,15 +719,15 @@ def _s_mode_init_sequence(p: AsmProgram) -> AsmProgram:
     # === General-purpose register initialization with random values ===
     # Initialize x1-x31 (x0 is hardwired to 0)
     for r in range(1, 32):
-        rand_val = random.getrandbits(64)
+        rand_val = _gen_gpr_value()
         p.li(f"x{r}", f"0x{rand_val:016x}")
 
     # === Floating-point register initialization with random values ===
     # Use x5 (t0) as temp register for loading values
     for r in range(32):
-        rand_val = random.getrandbits(64)
-        p.li("x5", f"0x{rand_val:016x}")
         op = random.choice(["fmv.h.x", "fmv.w.x", "fmv.d.x"])
+        rand_val = _gen_fpr_value(op)
+        p.li("x5", f"0x{rand_val:016x}")
         p.instr(op, f"f{r}", "x5")
 
     # Setup memory region pointer for Store/Load operations
@@ -716,6 +828,7 @@ def _s_mode_data_sections(p: AsmProgram) -> AsmProgram:
     p.label(SYM_MEM_REGION)
     _init_random_mem_region(p)  # Initialize with random data for fuzzing diversity
     p.label(SYM_MEM_REGION_END)
+    _init_stack_region_section(p)
 
     p.section(LBL_PAGE_TABLE_SEC, flags="aw", sect_type="@progbits")
     p.align(12)
@@ -919,11 +1032,11 @@ def _u_mode_init_sequence(p: AsmProgram) -> AsmProgram:
     # Initialize x1-x29 and x31 (x0 is hardwired to 0)
     # SKIP x30: it's the stack pointer, must keep pointing to kernel_stack_end
     for r in range(1, 30):
-        rand_val = random.getrandbits(64)
+        rand_val = _gen_gpr_value()
         p.li(f"x{r}", f"0x{rand_val:016x}")
 
     # x31 can be randomized (it will be overwritten by t6 later anyway)
-    rand_val = random.getrandbits(64)
+    rand_val = _gen_gpr_value()
     p.li("x31", f"0x{rand_val:016x}")
 
     # x18 must point to user stack for U-mode exception handling
@@ -1100,6 +1213,7 @@ def _u_mode_data_sections(p: AsmProgram) -> AsmProgram:
     p.label(SYM_MEM_REGION)
     _init_random_mem_region(p)  # Initialize with random data for fuzzing diversity
     p.label(SYM_MEM_REGION_END)
+    _init_stack_region_section(p)
 
     p.label(LBL_KERNEL_INSTR_START)
     p.label(LBL_KERNEL_INSTR_END)
@@ -1284,15 +1398,15 @@ def _cva6_init_reg(p: AsmProgram) -> AsmProgram:
 
     # Phase 1: Initialize ALL x1-x31 (x0 is hardwired to 0)
     for r in range(1, 32):
-        rand_val = random.getrandbits(64)
+        rand_val = _gen_gpr_value()
         p.li(f"x{r}", f"0x{rand_val:016x}")
 
     # Phase 2: Initialize ALL f0-f31 using x5 (t0) as temp
     for r in range(32):
-        rand_val = random.getrandbits(64)
-        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         # CVA6: Only use fmv.w.x or fmv.d.x (NO fmv.h.x!)
         op = random.choice(["fmv.w.x", "fmv.d.x"])
+        rand_val = _gen_fpr_value(op)
+        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         p.instr(op, f"f{r}", "x5")
 
     # Setup memory region pointer for Store/Load operations
@@ -1472,7 +1586,7 @@ def _cva6_data_sections(p: AsmProgram) -> AsmProgram:
 
     p.section(".region_0", flags="aw", sect_type="@progbits")
     p.label(SYM_REGION0)
-    rand_words = [f"0x{random.getrandbits(32):08x}" for _ in range(8)]
+    rand_words = [f"0x{_gen_mem_word():08x}" for _ in range(8)]
     p.data_word(*rand_words)
 
     # Memory region for load/store operations
@@ -1481,6 +1595,7 @@ def _cva6_data_sections(p: AsmProgram) -> AsmProgram:
     p.label(SYM_MEM_REGION)
     _init_random_mem_region(p)  # Initialize with random data for fuzzing diversity
     p.label(SYM_MEM_REGION_END)
+    _init_stack_region_section(p)
 
     return p
 
@@ -1874,15 +1989,15 @@ def _boom_init_reg(p: AsmProgram) -> AsmProgram:
     # === General-purpose register initialization ===
     # Initialize ALL x1-x31 (x0 is hardwired to 0)
     for r in range(1, 32):
-        rand_val = random.getrandbits(64)
+        rand_val = _gen_gpr_value()
         p.li(f"x{r}", f"0x{rand_val:016x}")
 
     # === Floating-point register initialization ===
     # BOOM: Only use fmv.w.x or fmv.d.x (NO fmv.h.x!)
     for r in range(32):
-        rand_val = random.getrandbits(64)
-        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         op = random.choice(["fmv.w.x", "fmv.d.x"])
+        rand_val = _gen_fpr_value(op)
+        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         p.instr(op, f"f{r}", "x5")
 
     # Setup memory region pointer for Store/Load operations
@@ -1987,7 +2102,7 @@ def _boom_data_sections(p: AsmProgram) -> AsmProgram:
 
     p.section(".region_0", flags="aw", sect_type="@progbits")
     p.label(SYM_REGION0)
-    rand_words = [f"0x{random.getrandbits(32):08x}" for _ in range(8)]
+    rand_words = [f"0x{_gen_mem_word():08x}" for _ in range(8)]
     p.data_word(*rand_words)
 
     # Memory region for load/store operations
@@ -1996,6 +2111,7 @@ def _boom_data_sections(p: AsmProgram) -> AsmProgram:
     p.label(SYM_MEM_REGION)
     _init_random_mem_region(p)
     p.label(SYM_MEM_REGION_END)
+    _init_stack_region_section(p)
 
     return p
 
@@ -2210,15 +2326,15 @@ def _rocket_init_reg(p: AsmProgram) -> AsmProgram:
     # === General-purpose register initialization ===
     # Initialize ALL x1-x31 (x0 is hardwired to 0)
     for r in range(1, 32):
-        rand_val = random.getrandbits(64)
+        rand_val = _gen_gpr_value()
         p.li(f"x{r}", f"0x{rand_val:016x}")
 
     # === Floating-point register initialization ===
-    # Rocket: Only use fmv.w.x or fmv.d.x (NO fmv.h.x!)
+    # BOOM: Only use fmv.w.x or fmv.d.x (NO fmv.h.x!)
     for r in range(32):
-        rand_val = random.getrandbits(64)
-        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         op = random.choice(["fmv.w.x", "fmv.d.x"])
+        rand_val = _gen_fpr_value(op)
+        p.li("x5", f"0x{rand_val:016x}")  # Use t0 as temp register
         p.instr(op, f"f{r}", "x5")
 
     # Setup memory region pointer for Store/Load operations
@@ -2323,7 +2439,7 @@ def _rocket_data_sections(p: AsmProgram) -> AsmProgram:
 
     p.section(".region_0", flags="aw", sect_type="@progbits")
     p.label(SYM_REGION0)
-    rand_words = [f"0x{random.getrandbits(32):08x}" for _ in range(8)]
+    rand_words = [f"0x{_gen_mem_word():08x}" for _ in range(8)]
     p.data_word(*rand_words)
 
     # Memory region for load/store operations
@@ -2332,6 +2448,7 @@ def _rocket_data_sections(p: AsmProgram) -> AsmProgram:
     p.label(SYM_MEM_REGION)
     _init_random_mem_region(p)
     p.label(SYM_MEM_REGION_END)
+    _init_stack_region_section(p)
 
     return p
 
