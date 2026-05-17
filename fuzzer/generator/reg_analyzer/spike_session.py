@@ -389,6 +389,20 @@ class SpikeSession:
             raise RuntimeError("Session not initialized")
         return (self.engine.get_mem_region_start(), self.engine.get_mem_region_size())
 
+    def get_stack_region_info(self) -> Tuple[int, int]:
+        """
+        Get stack_region address information for compressed SP memory operations
+
+        Returns:
+            Tuple of (start_address, size)
+
+        Raises:
+            RuntimeError: If session not initialized
+        """
+        if not self.initialized:
+            raise RuntimeError("Session not initialized")
+        return (self.engine.get_stack_region_start(), self.engine.get_stack_region_size())
+
     def read_memory(self, addr: int, size: int) -> bytes:
         """
         Read memory at specified address

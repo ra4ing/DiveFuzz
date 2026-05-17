@@ -19,6 +19,7 @@ ENTRY(_start)
  * Memory Layout:
  *   0x80000000 - 0x800FFFFF : Code and data sections (.text.init, .text, .tohost, .page_table, .data, .bss)
  *   0x80100000 - 0x80101FFF : Fixed mem_region for AMO/load/store testing (8KB)
+ *   0x80102000 - 0x801023FF : Fixed stack_region for compressed-SP memory testing (1KB)
  *
  * IMPORTANT: mem_region is placed at a FIXED address (0x80100000) to ensure
  * consistency between template ELF (used by spike_engine during generation)
@@ -44,5 +45,7 @@ SECTIONS
   /* Place mem_region at fixed absolute address to ensure consistency */
   . = 0x80100000;
   .mem_region : { *(.mem_region) }
+  . = ALIGN(0x1000);
+  .stack_region : { *(.stack_region) }
   _end = .;
 }

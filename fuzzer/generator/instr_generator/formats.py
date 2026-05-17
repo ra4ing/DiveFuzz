@@ -1778,8 +1778,9 @@ INSTRUCTION_FORMATS = {
     },
     "RV_C_D": {
         "c.fldsp": {
-            "format": "c.fldsp {FRD}, {UIMM_9_8}",
+            "format": "c.fldsp {FRD}, {UIMM_9_8}({SP})",
             "variables": [
+                "SP",
                 "UIMM_9_8",
                 "FRD"
             ],

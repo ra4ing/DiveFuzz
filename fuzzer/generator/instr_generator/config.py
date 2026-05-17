@@ -16,10 +16,6 @@ special_instr = [
                 # 'jal', 'beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu', 'c.j',
                 # 'c.beqz', 'c.bnez', 'c.jal',
                 # 'jalr', 'c.jr', 'c.jalr',
-                # Compressed load/store instructions
-                'c.sw', 'c.sd','c.fsw', 'c.fsd', \
-                'c.lwsp', 'c.swsp', 'c.lw', 'c.sw', 'c.ldsp', 'c.sdsp', 'c.ld', \
-                'c.sd', 'c.flw', 'c.flwsp', 'c.fldsp', 'c.fld', \
                 # Pseudo-instructions / not directly encodable random instructions.
                 # `li` is intentionally excluded from the random pool: real
                 # materialization instructions (lui/addi/addiw/slli/...) are

@@ -116,7 +116,28 @@ def get_instruction_format(instruction):
     return INSTRUCTION_FORMATS.get(instr_type.upper(), {}).get(instruction, {})
 
 
-def _generate_memop_offset(instr_name, var, category):
+def _category_names(category):
+    if isinstance(category, str):
+        return {category}
+    return set(category)
+
+
+def _is_memory_category(category):
+    categories = _category_names(category)
+    return bool(
+        categories
+        & {
+            'LOAD',
+            'STORE',
+            'LOAD_SP',
+            'STORE_SP',
+            'FLOAT_LOAD',
+            'FLOAT_STORE',
+        }
+    )
+
+
+def _generate_memop_offset(instr_name, var, category, variables):
     """
     Generate safe offset for load/store instructions.
 
@@ -128,19 +149,43 @@ def _generate_memop_offset(instr_name, var, category):
     Returns:
         String representation of the safe offset value
     """
-    if 'LOAD' in category or 'STORE' in category or \
-       'FLOAT_LOAD' in category or 'FLOAT_STORE' in category:
-        # T6-based load/store: generate safe offset for IMM_12
+    categories = _category_names(category)
+    if not _is_memory_category(category):
+        return None
+
+    if categories & {'LOAD_SP', 'STORE_SP'}:
+        access_width = MemoryAccessManager.ACCESS_WIDTH.get(instr_name, 4)
+        return str(MemoryAccessManager.get_safe_offset_for_sp(var, access_width))
+
+    if 'RS1_P' in variables:
+        return str(MemoryAccessManager.get_safe_offset_for_rs1p(instr_name, var))
+
+    if categories & {'LOAD', 'STORE', 'FLOAT_LOAD', 'FLOAT_STORE'}:
+        # T6-based load/store: generate safe offset for IMM_12.
         if var == 'IMM_12':
             imm = MemoryAccessManager.get_safe_offset_for_t6(instr_name)
             return str(imm)
-        else:
-            # Other immediate types (shouldn't happen for standard load/store)
-            # Fall back to normal generation
-            return None
-    else:
-        # Not a memory operation
-        return None
+
+    return None
+
+
+def _generate_memory_base_setup(category, variables, new_parts):
+    """
+    Emit local base initialization for compressed memory operations.
+
+    This protects generated c.*sp and RS1_P-based compressed memory ops from
+    stale/random base registers while preserving the target compressed opcode.
+    """
+    categories = _category_names(category)
+    if categories & {'LOAD_SP', 'STORE_SP'}:
+        return MemoryAccessManager.get_sp_base_setup()
+
+    if 'RS1_P' in variables and _is_memory_category(category):
+        base_reg = new_parts.get('RS1_P')
+        if base_reg is not None:
+            return MemoryAccessManager.get_rs1p_base_setup(base_reg)
+
+    return None
 
 
 def generate_new_instr(new_instr_op, extension, rd_history, rs_history,\
@@ -240,7 +285,7 @@ def generate_new_instr(new_instr_op, extension, rd_history, rs_history,\
         elif 'IMM' in var or 'UIMM' in var:
             # Check if this is a load/store instruction that needs safe offset
             category = instr_format.get('category', [])
-            memop_offset = _generate_memop_offset(new_instr_op, var, category)
+            memop_offset = _generate_memop_offset(new_instr_op, var, category, variables)
 
             if memop_offset is not None:
                 # Load/store instruction: use safe offset
@@ -260,6 +305,16 @@ def generate_new_instr(new_instr_op, extension, rd_history, rs_history,\
     new_instr = format_str
     for var, replacement in new_parts.items():
         new_instr = new_instr.replace("{" + var + "}", replacement)
+
+    base_setup = _generate_memory_base_setup(
+        instr_format.get('category', []),
+        variables,
+        new_parts,
+    )
+    if base_setup is not None:
+        new_instr = f"{base_setup}\n{new_instr}"
+        setup_dest = base_setup.split()[1].rstrip(',')
+        rd_history.use_register(setup_dest)
 
 
 

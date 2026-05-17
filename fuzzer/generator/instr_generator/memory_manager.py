@@ -33,7 +33,10 @@ class MemoryAccessManager:
     # Memory region constants
     MEM_REGION_SIZE = 8192  # 8KB data region for T6-based access
     MEM_REGION_CENTER = 4096  # T6 points to this offset within mem_region
+    MEM_REGION_RANDOM_START = 2048  # Start of randomized T6-accessible window
+    MEM_REGION_RANDOM_SIZE = 4096  # Full signed IMM_12 window around T6
     STACK_SIZE = 1024  # 1KB stack region for SP-based access
+    STACK_REGION_LABEL = "stack_region"
 
     # Access width mapping (instruction name -> bytes)
     ACCESS_WIDTH = {
@@ -54,6 +57,25 @@ class MemoryAccessManager:
         'c.fld': 8, 'c.fsd': 8,
         'c.flwsp': 4, 'c.fswsp': 4,
         'c.fldsp': 8, 'c.fsdsp': 8,
+    }
+
+    IMMEDIATE_MAX = {
+        'UIMM_7': 127,
+        'UIMM_7_4': 124,
+        'UIMM_7_8': 120,
+        'UIMM_8': 255,
+        'UIMM_8_4': 252,
+        'UIMM_8_8': 248,
+        'UIMM_9_8': 504,
+        'IMM_8': 127,
+    }
+
+    IMMEDIATE_ALIGNMENT = {
+        'UIMM_7_4': 4,
+        'UIMM_7_8': 8,
+        'UIMM_8_4': 4,
+        'UIMM_8_8': 8,
+        'UIMM_9_8': 8,
     }
 
     @staticmethod
@@ -103,20 +125,8 @@ class MemoryAccessManager:
         Returns:
             Safe offset value with proper alignment
         """
-        if uimm_type == 'UIMM_8_4':
-            # c.lwsp, c.swsp: 0-252 with 4-byte alignment
-            # Format: imm[5:2|7:6]
-            max_value = 252  # (2^6 - 1) * 4
-            alignment = 4
-        elif uimm_type == 'UIMM_9_8':
-            # c.ldsp, c.sdsp: 0-504 with 8-byte alignment
-            # Format: imm[5:3|8:6]
-            max_value = 504  # (2^6 - 1) * 8
-            alignment = 8
-        else:
-            # Default fallback
-            max_value = 252
-            alignment = 4
+        max_value = MemoryAccessManager.IMMEDIATE_MAX.get(uimm_type, 252)
+        alignment = MemoryAccessManager.IMMEDIATE_ALIGNMENT.get(uimm_type) or access_width or 1
 
         # Ensure offset doesn't exceed stack size
         max_safe_offset = min(max_value, MemoryAccessManager.STACK_SIZE - access_width)
@@ -126,6 +136,50 @@ class MemoryAccessManager:
         offset = random.randint(0, max_count) * alignment
 
         return offset
+
+    @staticmethod
+    def get_safe_offset_for_rs1p(instr_name, imm_type):
+        """
+        Generate a safe offset for compressed RS1_P-based memory operations.
+
+        The generator emits a local prelude that sets RS1_P to
+        mem_region + MEM_REGION_RANDOM_START.  Offsets are therefore generated
+        as non-negative values that keep the full access inside the randomized
+        T6-accessible window.
+        """
+        access_width = MemoryAccessManager.ACCESS_WIDTH.get(instr_name, 4)
+        max_value = MemoryAccessManager.IMMEDIATE_MAX.get(imm_type, 127)
+        alignment = MemoryAccessManager.IMMEDIATE_ALIGNMENT.get(imm_type) or access_width or 1
+        max_safe_offset = min(
+            max_value,
+            MemoryAccessManager.MEM_REGION_RANDOM_SIZE - access_width,
+        )
+        max_count = max_safe_offset // alignment
+        return random.randint(0, max_count) * alignment
+
+    @staticmethod
+    def get_rs1p_base_delta():
+        """
+        Return delta from T6 to the start of the randomized mem_region window.
+        """
+        return MemoryAccessManager.MEM_REGION_RANDOM_START - MemoryAccessManager.MEM_REGION_CENTER
+
+    @staticmethod
+    def get_rs1p_base_setup(base_reg):
+        """
+        Emit setup for RS1_P compressed memory bases using T6 as a stable anchor.
+        """
+        return f"addi {base_reg}, t6, {MemoryAccessManager.get_rs1p_base_delta()}"
+
+    @staticmethod
+    def get_sp_base_setup():
+        """
+        Emit setup for compressed SP memory operations.
+
+        c.*sp immediates are unsigned positive offsets, so sp must point to the
+        start of the stack access region rather than stack_end.
+        """
+        return f"la sp, {MemoryAccessManager.STACK_REGION_LABEL}"
 
     @staticmethod
     def get_template_initialization():
@@ -138,7 +192,7 @@ class MemoryAccessManager:
         return [
             "la t6, mem_region",
             "addi t6, t6, 4096",
-            "la sp, stack_end"
+            f"la sp, {MemoryAccessManager.STACK_REGION_LABEL}"
         ]
 
     @staticmethod
@@ -158,6 +212,7 @@ class MemoryAccessManager:
             "",
             ".section .stack_region,\"aw\",@progbits",
             ".align 4",
+            f"{MemoryAccessManager.STACK_REGION_LABEL}:",
             f".space {MemoryAccessManager.STACK_SIZE}",
-            "stack_end:"
+            "stack_region_end:"
         ]
