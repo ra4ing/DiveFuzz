@@ -86,8 +86,8 @@ def generate_instructions_parallel(
     resolve_duplicates_fail = 0
     timeout_count = 0
 
-    # The timeout period = the number of instructions * 0.8 seconds
-    timeout_seconds = instr_number * 0.0005
+    timeout_scale = float(os.environ.get("ASTRAFUZZ_TIMEOUT_SCALE", "0.003"))
+    timeout_seconds = instr_number * timeout_scale
     # Maximum retry count to prevent unlimited retries
     max_retries = 5
 
@@ -103,6 +103,7 @@ def generate_instructions_parallel(
     if eliminate_enable:
         # Ensure output directory exists
         os.makedirs(out_dir, exist_ok=True)
+
 
         use_stateful = use_stateful_cache
         if use_stateful:

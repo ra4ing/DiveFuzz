@@ -112,6 +112,26 @@ class InstructionValidator:
     _debug_logger_enabled = False
     _instr_counter = 0
 
+    @staticmethod
+    def _select_attribution_instruction(instruction: str) -> str:
+        """
+        Select the instruction used for XOR and precision-filter attribution.
+
+        Some generator paths emit a local setup block, for example:
+
+            la sp, stack_region
+            c.lwsp a0, 12(sp)
+
+        The whole block must be encoded and executed for state correctness, but
+        deduplication and bug filters should attribute the event to the target
+        fuzz instruction, not to the safety prelude.  The target instruction is
+        emitted last by the generator.
+        """
+        lines = [line.strip() for line in instruction.splitlines() if line.strip()]
+        if not lines:
+            return instruction
+        return lines[-1]
+
     def __init__(
         self,
         spike_session: SpikeSession,
@@ -151,29 +171,37 @@ class InstructionValidator:
 
     def _check_xor_unique(
         self, opcode: str, source_values: List[int]
-    ) -> Tuple[int, bool]:
+    ) -> Tuple[int, bool, int]:
         """
-        Compute XOR and check uniqueness.
+        Compute XOR and check uniqueness without modifying the cache.
 
         Returns:
-            Tuple of (xor_value, is_unique)
+            Tuple of (xor_value, is_unique, cache_value)
         """
         xor_value = compute_xor(source_values)
+        cache_value = xor_value
 
         if self.xor_cache is None:
-            return xor_value, True
+            return xor_value, True, cache_value
 
         if (
             self.use_stateful_cache
             and isinstance(self.xor_cache, StatefulXORCache)
             and self.spike_session is not None
         ):
-            is_unique = self.xor_cache.check_and_add_stateful(
+            cache_value = self.xor_cache.compute_stateful_value(
                 opcode, xor_value, self.spike_session
             )
+            is_unique = self.xor_cache.check(opcode, cache_value)
         else:
-            is_unique = self.xor_cache.check_and_add(opcode, xor_value)
-        return xor_value, is_unique
+            is_unique = self.xor_cache.check(opcode, cache_value)
+        return xor_value, is_unique, cache_value
+
+    def _commit_xor_unique(self, opcode: str, cache_value: int) -> bool:
+        """Commit a cache value after an instruction is otherwise accepted."""
+        if self.xor_cache is None:
+            return True
+        return self.xor_cache.check_and_add(opcode, cache_value)
 
     def _build_pre_execution_state(self) -> PreExecutionState:
         """
@@ -239,8 +267,10 @@ class InstructionValidator:
         if not instruction_seq:
             return False, 0
 
+        attribution_instruction = self._select_attribution_instruction(instruction)
+
         opcode, source_regs, dest_regs, immediate = self.parser.parse_instruction_full(
-            instruction
+            attribution_instruction
         )
         actual_bytes = sum(size for _, size in instruction_seq)
 
@@ -248,7 +278,9 @@ class InstructionValidator:
         if immediate is not None:
             source_values.append(immediate)
 
-        xor_value, is_unique = self._check_xor_unique(opcode, source_values)
+        xor_value, is_unique, cache_value = self._check_xor_unique(
+            opcode, source_values
+        )
         if not is_unique:
             return False, 0
 
@@ -256,11 +288,11 @@ class InstructionValidator:
         if self.precision_registry:
             s_pre = self._build_pre_execution_state()
             operands = (
-                [op.strip().rstrip(",") for op in instruction.split()[1:]]
-                if len(instruction.split()) > 1
+                [op.strip().rstrip(",") for op in attribution_instruction.split()[1:]]
+                if len(attribution_instruction.split()) > 1
                 else []
             )
-            ctx = self._build_filter_context(instruction, opcode, operands, s_pre)
+            ctx = self._build_filter_context(attribution_instruction, opcode, operands, s_pre)
 
             pre_reason = self.precision_registry.check_pre_execution(ctx)
             if pre_reason:
@@ -272,17 +304,18 @@ class InstructionValidator:
 
             machine_codes = [mc for mc, _ in instruction_seq]
             sizes = [sz for _, sz in instruction_seq]
+            self.spike_session.set_checkpoint()
             self.spike_session.execute_sequence(machine_codes, sizes)
 
             if self.precision_registry and s_pre:
                 s_post = self._build_post_execution_state()
                 operands = (
-                    [op.strip().rstrip(",") for op in instruction.split()[1:]]
-                    if len(instruction.split()) > 1
+                    [op.strip().rstrip(",") for op in attribution_instruction.split()[1:]]
+                    if len(attribution_instruction.split()) > 1
                     else []
                 )
                 ctx = self._build_filter_context(
-                    instruction, opcode, operands, s_pre, s_post
+                    attribution_instruction, opcode, operands, s_pre, s_post
                 )
 
                 post_reason = self.precision_registry.check_post_execution(ctx)
@@ -290,16 +323,24 @@ class InstructionValidator:
                     self.spike_session.restore_checkpoint_and_reset()
                     return False, 0
 
-            self._log_instruction(
-                instruction,
-                instruction_seq,
-                opcode,
-                source_regs,
-                source_values,
-                dest_regs,
-                xor_value,
-                immediate,
-            )
+            committed = self._commit_xor_unique(opcode, cache_value)
+            if not committed:
+                self.spike_session.restore_checkpoint_and_reset()
+                return False, 0
+
+            try:
+                self._log_instruction(
+                    instruction,
+                    instruction_seq,
+                    opcode,
+                    source_regs,
+                    source_values,
+                    dest_regs,
+                    xor_value,
+                    immediate,
+                )
+            except Exception as log_error:
+                self._log_exception(instruction, log_error)
 
             self.spike_session.confirm_instruction()
             return True, actual_bytes
@@ -308,8 +349,8 @@ class InstructionValidator:
             self._log_exception(instruction, e)
             try:
                 self.spike_session.restore_checkpoint_and_reset()
-            except:
-                pass
+            except Exception as restore_error:
+                self._log_exception(instruction, restore_error)
             return False, 0
 
     def _log_instruction(

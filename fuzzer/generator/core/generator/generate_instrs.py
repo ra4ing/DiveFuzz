@@ -115,6 +115,37 @@ def is_rv32_supported_generated_instr(complete_instr: str) -> bool:
     ) and ("minstret" not in complete_instr)
 
 
+def append_instruction_block(instructions: List[str], instruction: str) -> None:
+    """
+    Append a generated instruction or local setup block as individual lines.
+    """
+    instructions.extend(line for line in instruction.splitlines() if line.strip())
+
+
+def estimate_instruction_block_bytes(instruction: str) -> int:
+    """
+    Conservative byte estimate for non-eliminate mode.
+
+    The generator may emit local setup blocks before compressed memory ops.  We
+    do not have authoritative sizes without the encoder in this path, so mirror
+    the generator's known forms: la expands to two 4-byte instructions,
+    compressed instructions are 2 bytes, and all other lines count as one
+    4-byte instruction.
+    """
+    total = 0
+    for line in instruction.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("la "):
+            total += 8
+        elif stripped.startswith("c."):
+            total += 2
+        else:
+            total += 4
+    return total
+
+
 def generate_forward_jump_instrs(
     jump_instr: str,
     target_distance: int,
@@ -344,7 +375,8 @@ def generate_instructions(
                 spike_session = SpikeSession(
                     elf_path, template.isa, instr_number + NOP_REDUNDANCY
                 )
-                if spike_session.initialize():
+                initialized = spike_session.initialize()
+                if initialized:
                     # Attach to shared XOR cache from Master process
                     if xor_cache_state is not None:
                         xor_cache = XORCacheClass.from_worker_state(xor_cache_state)
@@ -1022,15 +1054,22 @@ def generate_instructions(
                         if retry_count >= MAX_MUTATE_TIME:
                             total_instr_retry += 1
                             continue
-                        # In non-eliminate mode, assume each logical instruction = 4 bytes
-                        # (pseudo-instruction expansion is not tracked without spike validation)
-                        actual_bytes += 4
+                        if complete_instr is None:
+                            total_instr_retry += 1
+                            continue
+                        assert isinstance(complete_instr, str)
+                        actual_bytes += estimate_instruction_block_bytes(complete_instr)
                 except IndexError as e:
                     complete_instr = "nop"
                     actual_bytes += 4  # nop is 4 bytes
                     pass
 
-            entire_instrs.append(complete_instr)
+            if complete_instr is None:
+                total_instr_retry += 1
+                continue
+            assert isinstance(complete_instr, str)
+            instruction_block: str = complete_instr
+            append_instruction_block(entire_instrs, instruction_block)
             logical_instr_index += 1
 
         # Check if we hit the retry limit (indicates too many blocked instructions)
