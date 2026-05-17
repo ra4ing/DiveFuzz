@@ -20,8 +20,16 @@ Core functionality:
 Design features:
     1. Bloom Filter: Multiple hash functions, space-efficient
     2. Pure integer hashing: FNV-1a + SplitMix64 double hashing
-    3. Shared memory: Multi-process safe
+    3. Shared memory: Multi-process safe via lockless shared-memory bitmap
     4. Dynamic capacity: Auto-calculate optimal size based on workload
+
+Concurrency model:
+    Lockless delayed-commit — workers check() and add() without coordination.
+    The two-phase validation pipeline in InstructionValidator ensures that
+    rejected candidates never pollute the Bloom filter.  Concurrent workers may
+    occasionally commit the same value if they both observe it before either
+    sets the bitmap bits; this is the accepted tradeoff for avoiding a global
+    inter-process lock.
 
 Usage example:
     # Master process
@@ -31,8 +39,9 @@ Usage example:
 
     # Worker process
     cache = XORCache.from_worker_state(state)
-    if cache.check_and_add("add", xor_value):
-        # New combination, accept
+    if cache.check("add", xor_value):
+        # Run validation, then commit only after final acceptance
+        cache.add("add", xor_value)
     else:
         # Possible duplicate, regenerate
 
@@ -65,8 +74,6 @@ _MASK_64: int = 0xFFFFFFFFFFFFFFFF
 # Default configuration
 _DEFAULT_SIZE_MB: float = 1.0
 _DEFAULT_NUM_HASHES: int = 7
-_MIN_SIZE_BITS: int = 64 * 1024 * 8       # 64 KB
-_MAX_SIZE_BITS: int = 16 * 1024 * 1024 * 8  # 16 MB
 _CHUNK_SIZE: int = 1024 * 1024  # 1 MB chunked zeroing
 
 
@@ -100,6 +107,14 @@ def compute_xor(values: list) -> int:
     for i, value in enumerate(values):
         result ^= (value << i)
     return result & 0xFFFFFFFFFFFFFFFF
+
+
+def _require_shm_buffer(shm: shared_memory.SharedMemory) -> memoryview:
+    """Return a live shared-memory buffer or fail loudly if it is unavailable."""
+    buffer = shm.buf
+    if buffer is None:
+        raise RuntimeError("Shared memory buffer is unavailable")
+    return buffer
 
 
 # =============================================================================
@@ -176,10 +191,12 @@ class XORCache:
         if expected_elements <= 0:
             expected_elements = 10000
 
-        # Calculate optimal size
+        # Calculate optimal size without artificial caps.  The experiment
+        # driver is responsible for choosing --xor-cache-expected-seeds and
+        # provisioning enough Docker shared memory (/dev/shm).
         ln2_squared = math.log(2) ** 2
         bits_needed = -expected_elements * math.log(false_positive_rate) / ln2_squared
-        size_bits = max(_MIN_SIZE_BITS, min(int(bits_needed), _MAX_SIZE_BITS))
+        size_bits = int(bits_needed)
 
         # Calculate optimal number of hashes
         optimal_k = (size_bits / expected_elements) * math.log(2)
@@ -202,16 +219,16 @@ class XORCache:
     # Core API
     # -------------------------------------------------------------------------
 
-    def check_and_add(self, opcode: str, xor_value: int) -> bool:
+    def check(self, opcode: str, xor_value: int) -> bool:
         """
-        Check if (opcode, xor_value) is unique, add if unique
+        Check if (opcode, xor_value) is unique without modifying the cache.
 
         Args:
             opcode: Instruction opcode (e.g. "add", "sub")
             xor_value: Shifted XOR value of source operands
 
         Returns:
-            True: New combination, added
+            True: Definitely new combination
             False: Possible duplicate (false positive or true duplicate)
         """
         if self._buffer is None:
@@ -219,17 +236,34 @@ class XORCache:
 
         positions = self._hash_positions(opcode, xor_value)
 
-        # Check if all bits are already set
         for pos in positions:
             byte_idx = pos // 8
             bit_idx = pos % 8
             if not (self._buffer[byte_idx] & (1 << bit_idx)):
-                # At least one bit is 0, definitely new
-                self._set_bits(positions)
                 return True
 
-        # All bits are 1, may exist
         return False
+
+    def add(self, opcode: str, xor_value: int) -> None:
+        """
+        Add (opcode, xor_value) to the cache.
+
+        This should be called only after a candidate instruction has passed all
+        validation stages.  Separating check from add prevents rejected
+        candidates from polluting the Bloom filter.
+        """
+        if self._buffer is None:
+            return
+        self._add_unlocked(opcode, xor_value)
+
+    def check_and_add(self, opcode: str, xor_value: int) -> bool:
+        """
+        Check if (opcode, xor_value) is unique, add if unique.
+
+        This legacy one-step API is kept for existing callers.  New validation
+        paths should prefer check() followed by add() after final acceptance.
+        """
+        return self._check_and_add_unlocked(opcode, xor_value)
 
     # -------------------------------------------------------------------------
     # Serialization/Deserialization (multi-process support)
@@ -270,8 +304,9 @@ class XORCache:
         instance._is_owner = False
 
         # Attach to existing shared memory
-        instance._shm = shared_memory.SharedMemory(name=state['shm_name'])
-        instance._buffer = memoryview(instance._shm.buf)
+        shm = shared_memory.SharedMemory(name=state['shm_name'])
+        instance._shm = shm
+        instance._buffer = _require_shm_buffer(shm)
 
         return instance
 
@@ -356,12 +391,13 @@ class XORCache:
         except FileNotFoundError:
             pass
 
-        self._shm = shared_memory.SharedMemory(
+        shm = shared_memory.SharedMemory(
             name=self._name,
             create=True,
             size=self._size_bytes
         )
-        self._buffer = memoryview(self._shm.buf)
+        self._shm = shm
+        self._buffer = _require_shm_buffer(shm)
         self._is_owner = True
 
         # Efficient chunked zeroing
@@ -443,19 +479,53 @@ class XORCache:
         # Double hashing formula: pos[i] = (h1 + i * h2) mod m
         return [(h1 + i * h2) % self._size_bits for i in range(self._num_hashes)]
 
-    def _set_bits(self, positions: list) -> None:
-        """Set all bits at specified positions"""
+    def _check_unlocked(self, opcode: str, xor_value: int) -> bool:
+        """Check uniqueness without locking or mutating the bitmap."""
+        if self._buffer is None:
+            return True
+
+        positions = self._hash_positions(opcode, xor_value)
         for pos in positions:
             byte_idx = pos // 8
             bit_idx = pos % 8
-            self._buffer[byte_idx] |= (1 << bit_idx)
+            if not (self._buffer[byte_idx] & (1 << bit_idx)):
+                return True
+        return False
+
+    def _add_unlocked(self, opcode: str, xor_value: int) -> None:
+        """Add a value without acquiring the cache lock."""
+        if self._buffer is None:
+            return
+        positions = self._hash_positions(opcode, xor_value)
+        self._set_bits(positions)
+
+    def _check_and_add_unlocked(self, opcode: str, xor_value: int) -> bool:
+        """Lockless check followed by add; concurrent callers may both win."""
+        if not self._check_unlocked(opcode, xor_value):
+            return False
+        self._add_unlocked(opcode, xor_value)
+        return True
+
+    def _set_bits(self, positions: list) -> None:
+        """Set all bits at specified positions"""
+        buffer = self._buffer
+        if buffer is None:
+            return
+        for pos in positions:
+            byte_idx = pos // 8
+            bit_idx = pos % 8
+            buffer[byte_idx] |= (1 << bit_idx)
 
     def _zero_memory(self) -> None:
         """Efficiently zero shared memory in chunks"""
+        shm = self._shm
+        if shm is None:
+            return
+        buffer = _require_shm_buffer(shm)
         zeros = b'\x00' * min(_CHUNK_SIZE, self._size_bytes)
         for i in range(0, self._size_bytes, _CHUNK_SIZE):
             end = min(i + _CHUNK_SIZE, self._size_bytes)
-            self._shm.buf[i:end] = zeros[:end - i]
+            buffer[i:end] = zeros[:end - i]
 
     # -------------------------------------------------------------------------
     # Property accessors

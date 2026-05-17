@@ -99,6 +99,22 @@ _CATEGORY_TO_CONTEXT = {
     "PREFETCH": InstructionContext.MEMORY,
 }
 
+# FP opcodes whose results do NOT depend on the floating-point rounding mode
+# (frm CSR).  Including frm in the context hash for these creates false
+# diversity: same operands + different frm → different hash → both accepted,
+# but identical writeback value.
+#
+# Rationale (IEEE 754 / RISC-V ISA): bitwise move, sign injection, classify,
+# widening convert (no precision loss), and min/max are all rounding-invariant.
+_NO_ROUNDING_FP_OPS: frozenset = frozenset({
+    "fmv.x.s", "fmv.x.d", "fmv.s.x", "fmv.d.x",
+    "fsgnj.s", "fsgnjn.s", "fsgnjx.s",
+    "fsgnj.d", "fsgnjn.d", "fsgnjx.d",
+    "fclass.s", "fclass.d",
+    "fcvt.d.s",
+    "fmin.s", "fmax.s", "fmin.d", "fmax.d",
+})
+
 
 def extract_float_context(spike_session: "SpikeSession") -> List[Tuple[str, int]]:
     frm = spike_session.get_csr(_FRM_CSR_ADDR)
@@ -202,6 +218,8 @@ def get_instruction_context(opcode: str) -> InstructionContext:
             for cat in categories:
                 if cat in _CATEGORY_TO_CONTEXT:
                     ctx = _CATEGORY_TO_CONTEXT[cat]
+                    if ctx == InstructionContext.FLOAT and opcode in _NO_ROUNDING_FP_OPS:
+                        ctx = InstructionContext.GENERAL
                     _opcode_context_cache[opcode] = ctx
                     return ctx
     except Exception:
@@ -245,6 +263,52 @@ class StatefulXORCache(XORCache):
     def compute_combined_hash(self, xor_value: int, context_hash: int) -> int:
         return ((xor_value & 0xFFFFFFFF) << 32) | (context_hash & 0xFFFFFFFF)
 
+    def compute_stateful_value(
+        self,
+        opcode: str,
+        xor_value: int,
+        spike_session: "SpikeSession",
+        context_type: Optional[InstructionContext] = None,
+    ) -> int:
+        """Compute the exact cache value for the current pre-execution state."""
+        if context_type is None:
+            context_type = get_instruction_context(opcode)
+        if context_type == InstructionContext.GENERAL:
+            return xor_value
+        context_fields = extract_context(context_type, spike_session)
+        context_hash = compute_context_hash(context_fields)
+        return self.compute_combined_hash(xor_value, context_hash)
+
+    def check_stateful(
+        self,
+        opcode: str,
+        xor_value: int,
+        spike_session: "SpikeSession",
+        context_type: Optional[InstructionContext] = None,
+    ) -> bool:
+        """Check stateful uniqueness without modifying the cache."""
+        cache_value = self.compute_stateful_value(
+            opcode, xor_value, spike_session, context_type
+        )
+        return self.check(opcode, cache_value)
+
+    def add_stateful_value(self, opcode: str, cache_value: int) -> None:
+        """Add a previously computed stateful cache value."""
+        self.add(opcode, cache_value)
+
+    def add_stateful(
+        self,
+        opcode: str,
+        xor_value: int,
+        spike_session: "SpikeSession",
+        context_type: Optional[InstructionContext] = None,
+    ) -> None:
+        """Compute and add a stateful cache value."""
+        cache_value = self.compute_stateful_value(
+            opcode, xor_value, spike_session, context_type
+        )
+        self.add_stateful_value(opcode, cache_value)
+
     def check_and_add_stateful(
         self,
         opcode: str,
@@ -252,14 +316,10 @@ class StatefulXORCache(XORCache):
         spike_session: "SpikeSession",
         context_type: Optional[InstructionContext] = None,
     ) -> bool:
-        if context_type is None:
-            context_type = get_instruction_context(opcode)
-        if context_type == InstructionContext.GENERAL:
-            return self.check_and_add(opcode, xor_value)
-        context_fields = extract_context(context_type, spike_session)
-        context_hash = compute_context_hash(context_fields)
-        combined_value = self.compute_combined_hash(xor_value, context_hash)
-        return self.check_and_add(opcode, combined_value)
+        cache_value = self.compute_stateful_value(
+            opcode, xor_value, spike_session, context_type
+        )
+        return self.check_and_add(opcode, cache_value)
 
     def get_state_for_worker(self) -> Dict[str, Any]:
         state = super().get_state_for_worker()
