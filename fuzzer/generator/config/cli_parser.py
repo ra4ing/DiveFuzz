@@ -76,6 +76,12 @@ def create_parser():
         help="Number of seed files generated (i.e., number of seed files)",
     )
     parser.add_argument(
+        "--seed-offset",
+        type=int,
+        default=0,
+        help="Start seed numbering from this offset (for resuming after a previous run)",
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=os.cpu_count() or 20,
@@ -100,6 +106,21 @@ def create_parser():
         type=Path,
         default=Path("out-seeds-2025-test"),
         help="Output seed file directory in generate mode (used in generate mode)",
+    )
+    parser.add_argument(
+        "--xor-cache-expected-seeds",
+        type=int,
+        default=None,
+        help=(
+            "Expected seed count used only to size the XOR cache. "
+            "Defaults to --seeds; useful for streaming generation that invokes "
+            "the generator one seed at a time while preserving xor_cache.bloom."
+        ),
+    )
+    parser.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="Delete existing xor_cache.bloom before starting (default: resume from existing cache)",
     )
 
     # —— Feature toggles ——

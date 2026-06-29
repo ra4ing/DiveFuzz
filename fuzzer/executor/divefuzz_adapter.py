@@ -14,6 +14,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 from config.dut_config import GeneratedSeedConfig
 
@@ -57,6 +58,7 @@ def setup_divefuzz(seed_config: GeneratedSeedConfig, global_logger):
         cva6=seed_config.divefuzz.is_cva6,
         rv32=seed_config.divefuzz.is_rv32,
         instr_number=seed_config.divefuzz.ins_num,
+        seed_offset=seed_config.divefuzz.seed_offset,
         seeds=seed_config.divefuzz.seeds_num,
         max_workers=seed_config.divefuzz.threads,
         seed_dir=Path(seed_config.divefuzz.seeds_output),
@@ -75,6 +77,8 @@ def setup_divefuzz(seed_config: GeneratedSeedConfig, global_logger):
         debug_all=seed_config.divefuzz.debug_all,
         debug_no_csr=seed_config.divefuzz.debug_no_csr,
         debug_no_fpr=seed_config.divefuzz.debug_no_fpr,
+        xor_cache_expected_seeds=seed_config.divefuzz.xor_cache_expected_seeds,
+        clean_cache=seed_config.divefuzz.clean_cache,
     )
     _divefuzz_config = setup_config(divefuzz_config)
 
@@ -98,6 +102,7 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
         generate_instructions_parallel(
             instr_number=seed_config.divefuzz.ins_num,
             seed_times=seed_config.divefuzz.seeds_num,
+            seed_offset=seed_config.divefuzz.seed_offset,
             eliminate_enable=seed_config.divefuzz.dive_enable,
             is_rv32=seed_config.divefuzz.is_rv32,
             max_workers=seed_config.divefuzz.threads,
@@ -106,9 +111,11 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
             out_dir=str(_divefuzz_config.out_dir),
             architecture=_divefuzz_config.architecture,
             debug_config=debug_config,
+            stateful_xor_cache=seed_config.divefuzz.stateful_xor_cache,
             bug_filter_enable=seed_config.divefuzz.bug_filter_enable,
             jump_enable=seed_config.divefuzz.jump_enable,
-            stateful_xor_cache=seed_config.divefuzz.stateful_xor_cache,
+            xor_cache_expected_seeds=_divefuzz_config.xor_cache_expected_seeds,
+            clean_cache=_divefuzz_config.clean_cache,
         )
 
     elif seed_config.divefuzz.mode == "mutate":
@@ -125,18 +132,20 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
     else:
         raise ValueError(f"Unknown mode: {seed_config.divefuzz.mode}")
 
-    return process_divefuzz_asm(seed_config, seed_config_logger)
+    return process_divefuzz_asm(seed_config, seed_config_logger, seed_offset=seed_config.divefuzz.seed_offset)
         
 
 
-def process_divefuzz_asm(seed_config: GeneratedSeedConfig, seed_config_logger):
+def process_divefuzz_asm(seed_config: GeneratedSeedConfig, seed_config_logger, seed_offset: int = 0):
 
     # Use the configured seeds_output directory
     generator_output_dir = Path(seed_config.divefuzz.seeds_output)
 
-    # convert img/elf
-    seed_config_logger.info("Converting assembly to elf files...")
-    process_assembly_files(str(generator_output_dir))
+    # convert img/elf — use incremental compilation when appending seeds
+    incremental = seed_offset > 0
+    seed_config_logger.info("Converting assembly to elf files..."
+                            + (" (incremental)" if incremental else ""))
+    process_assembly_files(str(generator_output_dir), incremental=incremental)
 
     # find img files (binary format for DUT execution)
     # All DUTs (NutShell, Rocket, XiangShan) use .img format
@@ -148,9 +157,15 @@ def process_divefuzz_asm(seed_config: GeneratedSeedConfig, seed_config_logger):
     seed_files = []
     for file in os.listdir(img_dir):
         if file.endswith(".img"):
+            # Extract seed index from filename (e.g., seeds_50_.img -> 50)
+            if seed_offset > 0:
+                m = re.match(r'seeds_(\d+)_[^/]*\.img$', file)
+                if m and int(m.group(1)) < seed_offset:
+                    continue
             seed_files.append(os.path.join(img_dir, file))
 
     seed_config_logger.info(
-        f"Found {len(seed_files)} generated seed files (.img)")
+        f"Found {len(seed_files)} generated seed files (.img)"
+        + (f" (starting from #{seed_offset})" if seed_offset > 0 else ""))
 
     return seed_files

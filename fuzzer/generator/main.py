@@ -71,6 +71,7 @@ def main():
         generate_instructions_parallel(
             instr_number=config.instr_number,
             seed_times=config.seed_times,
+            seed_offset=config.seed_offset,
             eliminate_enable=config.eliminate_enable,
             is_rv32=config.is_rv32,
             max_workers=config.max_workers,
@@ -79,9 +80,11 @@ def main():
             out_dir=str(config.out_dir),
             architecture=config.architecture or "xs",
             debug_config=debug_config,
-            use_stateful_cache=config.stateful_xor_cache,
+            stateful_xor_cache=config.stateful_xor_cache,
             bug_filter_enable=config.bug_filter_enable,
             jump_enable=config.jump_enable,
+            xor_cache_expected_seeds=config.xor_cache_expected_seeds,
+            clean_cache=config.clean_cache,
         )
 
         # Write ISA info for downstream tools (e.g., spike runner)

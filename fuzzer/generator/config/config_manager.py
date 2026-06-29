@@ -65,6 +65,13 @@ class Config:
 
         self.instr_number = int(args.instr_number)
         self.seed_times = int(args.seeds)
+        self.xor_cache_expected_seeds = (
+            int(args.xor_cache_expected_seeds)
+            if args.xor_cache_expected_seeds is not None
+            else self.seed_times
+        )
+        self.clean_cache = bool(getattr(args, 'clean_cache', False))
+        self.seed_offset = int(getattr(args, 'seed_offset', 0))
         self.max_workers = max(1, int(args.max_workers))
 
         self.directory_path = args.seed_dir.resolve()

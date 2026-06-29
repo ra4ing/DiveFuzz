@@ -239,6 +239,17 @@ def _xs_init(p: AsmProgram) -> AsmProgram:
     if mpp != 3:
         p.instr("sfence.vma x0, x0")
 
+
+
+    # NOTE: mstateen0 initialization REMOVED.
+    # Writing mstateen0 (0x30C) was originally added to synchronize Spike and
+    # XiangShan state for senvcfg/henvcfg access. However, the Spike reference
+    # model used for difftest does NOT implement Smstateen, so writing mstateen0
+    # causes Spike to raise an illegal-instruction exception (mcause=2) while
+    # XiangShan processes it normally. This leads to 100% seed failure rate.
+    # The senvcfg/henvcfg access case is already handled independently by the
+    # W-16 (senvcfg) and W-17 (henvcfg) bug filters.
+
     # Initialize exception delegation registers to ensure consistency
     # between Spike and DUT (BOOM). Without this, random CSR writes to
     # medeleg/mideleg can cause Spike and DUT to use different trap vectors.

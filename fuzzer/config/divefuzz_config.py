@@ -30,6 +30,7 @@ class DiveFuzzArgConfig:
     template_type: str = 'rocket'
 
     instr_number: int = 200
+    seed_offset: int = 0
     seeds: int = 10
     max_workers: int = (os.cpu_count() or 20)
 
@@ -55,3 +56,5 @@ class DiveFuzzArgConfig:
     debug_all: bool = False
     debug_no_csr: bool = False
     debug_no_fpr: bool = False
+    xor_cache_expected_seeds: int | None = None
+    clean_cache: bool = False

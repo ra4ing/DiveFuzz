@@ -20,7 +20,11 @@ special_instr = [
                 # `li` is intentionally excluded from the random pool: real
                 # materialization instructions (lui/addi/addiw/slli/...) are
                 # generated directly instead of relying on assembler fallback.
-                'li', 'nop', 'frrm', 'fsrm', 'frflags', 'fsflags',
+                # `nop` has no meaningful microarchitectural effect (writes to x0).
+                # CSR pseudo-instructions (frrm, fsrm, frflags, fsflags) are
+                # expanded to real CSR instructions (csrrs/csrrw) after generation
+                # so the fast InstructionEncoder can handle them directly.
+                'li', 'nop',
                 #'pack', 'packw', 'packh'
                 #'nop'
                 #'pack', 'packh', 'packw'

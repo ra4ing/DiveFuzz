@@ -77,29 +77,46 @@ def process_file_for_spec(filename, folder_path, img_folder, elf_folder):
 
     
 
-def process_assembly_files(folder_path):
+def process_assembly_files(folder_path, incremental=False):
     """
     Process all assembly files (.S) in the specified folder.
 
     Parameters:
     folder_path: Path to the folder to be processed.
+    incremental: If True, skip files that already have a corresponding .img.
     """
-    grandparent_folder = os.path.dirname(os.path.dirname(folder_path))
-
     img_folder = os.path.join(folder_path, 'img_file')
     os.makedirs(img_folder, exist_ok=True)
 
     elf_folder = os.path.join(folder_path, 'elf_file')
     os.makedirs(elf_folder, exist_ok=True)
 
-    assembly_files = [f for f in os.listdir(folder_path) if f.endswith('.S')]
+    all_asm = [f for f in os.listdir(folder_path) if f.endswith('.S')]
+
+    if incremental:
+        to_process = []
+        for f in all_asm:
+            base = os.path.splitext(f)[0]
+            img_path = os.path.join(img_folder, base + '.img')
+            if not os.path.isfile(img_path):
+                to_process.append(f)
+        skipped = len(all_asm) - len(to_process)
+        if skipped > 0:
+            print(f"Incremental mode: skipping {skipped} already-compiled file(s)")
+        assembly_files = to_process
+    else:
+        assembly_files = all_asm
+
+    if not assembly_files:
+        print("No new assembly files to process.")
+        return
 
     # Use a thread pool to process files
     with ThreadPoolExecutor() as executor:
         list(tqdm(executor.map(process_file, assembly_files, [folder_path]*len(assembly_files), [img_folder]*len(assembly_files), \
                             [elf_folder]*len(assembly_files)), total=len(assembly_files), desc="Processing assembly files"))
 
-    print("Successfully generated img files!")
+    print(f"Successfully generated {len(assembly_files)} img file(s)!")
 
 
 

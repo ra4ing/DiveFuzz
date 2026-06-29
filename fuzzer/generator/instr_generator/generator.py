@@ -328,7 +328,32 @@ def generate_new_instr(new_instr_op, extension, rd_history, rs_history,\
         new_instr = ' '.join(parts)
 
 
+    new_instr = _expand_csr_pseudo(new_instr)
+
     return new_instr
+
+
+_CSR_PSEUDO_EXPAND = {
+    "frrm":     lambda parts: f"csrrs {parts[1]}, frm, zero",
+    "frflags":  lambda parts: f"csrrs {parts[1]}, fflags, zero",
+    "fsrm":     lambda parts: f"csrrw {parts[1]}, frm, {parts[2]}",
+    "fsflags":  lambda parts: f"csrrw {parts[1]}, fflags, {parts[2]}",
+}
+
+
+def _expand_csr_pseudo(instr: str) -> str:
+    if not instr:
+        return instr
+    lines = instr.splitlines()
+    last = lines[-1]
+    parts = last.replace(",", " ").split()
+    if not parts:
+        return instr
+    expander = _CSR_PSEUDO_EXPAND.get(parts[0])
+    if expander is None:
+        return instr
+    lines[-1] = expander(parts)
+    return "\n".join(lines)
 
 
 def generate_instruction_probabilities(instruction_usage, probabilities, allowed_ext, special_probabilities):

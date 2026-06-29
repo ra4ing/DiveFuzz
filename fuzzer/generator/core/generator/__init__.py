@@ -37,7 +37,14 @@ def _terminate_executor_workers(executor: ProcessPoolExecutor):
             process.terminate()
 
     for process in processes.values():
-        process.join(timeout=1)
+        process.join(timeout=0.2)
+
+    for process in processes.values():
+        if process.is_alive():
+            process.kill()
+
+    for process in processes.values():
+        process.join(timeout=0.2)
 
 
 def generate_instructions_parallel(
@@ -51,9 +58,12 @@ def generate_instructions_parallel(
     out_dir: str = "out-seeds-2025-test",
     architecture: str = "xs",
     debug_config: dict | None = None,
-    use_stateful_cache: bool = True,
+    stateful_xor_cache: bool = True,
     bug_filter_enable: bool = True,
     jump_enable: bool = True,
+    xor_cache_expected_seeds: int | None = None,
+    seed_offset: int = 0,
+    clean_cache: bool = False,
 ):
     """
     Generate random RISC-V instructions in parallel across multiple processes.
@@ -86,8 +96,9 @@ def generate_instructions_parallel(
     resolve_duplicates_fail = 0
     timeout_count = 0
 
-    timeout_scale = float(os.environ.get("ASTRAFUZZ_TIMEOUT_SCALE", "0.003"))
-    timeout_seconds = instr_number * timeout_scale
+    timeout_scale = float(os.environ.get("ASTRAFUZZ_TIMEOUT_SCALE", "0.3"))
+    timeout_min_seconds = float(os.environ.get("ASTRAFUZZ_TIMEOUT_MIN", "3.0"))
+    timeout_seconds = max(instr_number * timeout_scale, timeout_min_seconds)
     # Maximum retry count to prevent unlimited retries
     max_retries = 5
 
@@ -104,11 +115,14 @@ def generate_instructions_parallel(
         # Ensure output directory exists
         os.makedirs(out_dir, exist_ok=True)
 
+        cache_seed_count = xor_cache_expected_seeds or seed_times
+        if cache_seed_count <= 0:
+            cache_seed_count = seed_times
 
-        use_stateful = use_stateful_cache
+        use_stateful = stateful_xor_cache
         if use_stateful:
             xor_cache = StatefulXORCache.create_for_workload(
-                num_seeds=seed_times,
+                num_seeds=cache_seed_count,
                 instrs_per_seed=instr_number,
                 false_positive_rate=0.01,
             )
@@ -117,11 +131,15 @@ def generate_instructions_parallel(
             from ...reg_analyzer.xor_cache import XORCache
 
             xor_cache = XORCache.create_for_workload(
-                num_seeds=seed_times,
+                num_seeds=cache_seed_count,
                 instrs_per_seed=instr_number,
                 false_positive_rate=0.01,
             )
         xor_cache.create()
+
+        # Remove existing cache if clean_cache is set (fresh start)
+        if clean_cache and os.path.exists(cache_file):
+            os.remove(cache_file)
 
         # Load existing cache if available (for incremental fuzzing)
         if os.path.exists(cache_file):
@@ -132,15 +150,13 @@ def generate_instructions_parallel(
                 print(f"# Please delete the file or fix the issue before continuing.")
                 xor_cache.cleanup()
                 raise RuntimeError(f"Failed to load XOR cache: {e}")
-
         xor_cache_state = xor_cache.get_state_for_worker()
 
     # Ensure xor_cache_state is a dict when passed to worker functions
     xor_cache_state = xor_cache_state or {}
 
     try:
-        # The list of seed indexes to be generated
-        pending_seeds = list(range(seed_times))
+        pending_seeds = list(range(seed_offset, seed_offset + seed_times))
         completed_count = 0
         retry_round = 0
 
@@ -151,85 +167,104 @@ def generate_instructions_parallel(
                 )
 
             retry_seeds = []
-            seed_batches = [
-                pending_seeds[index : index + max_workers]
-                for index in range(0, len(pending_seeds), max_workers)
-            ]
+            executor = ProcessPoolExecutor(max_workers=max_workers)
+            futures = {}
+            seed_deadlines = {}
+            force_terminate_workers = False
 
-            for seed_batch in seed_batches:
-                executor = ProcessPoolExecutor(max_workers=max_workers)
-                futures = {}
-                timed_out = False
+            def _submit(seed_idx: int):
+                """Submit a seed and record its per-seed deadline."""
+                future = executor.submit(
+                    generate_instructions,
+                    instr_number,
+                    seed_idx,
+                    eliminate_enable,
+                    is_rv32,
+                    arch,
+                    template_type,
+                    out_dir,
+                    xor_cache_state,
+                    use_stateful_cache=stateful_xor_cache,
+                    architecture=architecture,
+                    debug_config=debug_config,
+                    bug_filter_enable=bug_filter_enable,
+                    jump_enable=jump_enable,
+                )
+                futures[future] = seed_idx
+                seed_deadlines[future] = time.monotonic() + timeout_seconds
+                return future
 
-                try:
-                    for seed_idx in seed_batch:
-                        future = executor.submit(
-                            generate_instructions,
-                            instr_number,
-                            seed_idx,
-                            eliminate_enable,
-                            is_rv32,
-                            arch,
-                            template_type,
-                            out_dir,
-                            xor_cache_state,
-                            use_stateful_cache=use_stateful_cache,
-                            architecture=architecture,
-                            debug_config=debug_config,
-                            bug_filter_enable=bug_filter_enable,
-                            jump_enable=jump_enable,
-                        )
-                        futures[future] = seed_idx
+            initial_seeds = pending_seeds[:max_workers]
+            remaining_queue = list(pending_seeds[max_workers:])
+            for seed_idx in initial_seeds:
+                _submit(seed_idx)
 
-                    progress = tqdm(
-                        total=len(futures),
-                        desc="# Generating instructions",
+            progress = tqdm(
+                total=len(pending_seeds),
+                desc="# Generating instructions",
+            )
+
+            try:
+                while futures:
+                    earliest_deadline = min(seed_deadlines[f] for f in futures)
+                    remaining_time = max(earliest_deadline - time.monotonic(), 0.1)
+
+                    done, _ = wait(
+                        futures,
+                        timeout=remaining_time,
+                        return_when=FIRST_COMPLETED,
                     )
-                    deadline = time.monotonic() + timeout_seconds
-                    unfinished = set(futures)
 
-                    try:
-                        while unfinished:
-                            remaining_time = deadline - time.monotonic()
-                            if remaining_time <= 0:
-                                timed_out = True
-                                break
+                    now = time.monotonic()
 
-                            done, unfinished = wait(
-                                unfinished,
-                                timeout=remaining_time,
-                                return_when=FIRST_COMPLETED,
+                    if not done:
+                        timed_out_futures = [
+                            f for f in list(futures)
+                            if seed_deadlines.get(f, float("inf")) <= now
+                        ]
+                        if timed_out_futures:
+                            force_terminate_workers = True
+                        for future in timed_out_futures:
+                            seed_idx = futures.pop(future)
+                            seed_deadlines.pop(future, None)
+                            future.cancel()
+                            timeout_count += 1
+                            retry_seeds.append(seed_idx)
+                            print(
+                                f"# Seed {seed_idx} timed out ({timeout_seconds}s)"
                             )
-                            if not done:
-                                timed_out = True
-                                break
+                            progress.update(1)
+                            if remaining_queue:
+                                _submit(remaining_queue.pop(0))
+                        continue
 
-                            for future in done:
-                                seed_idx = futures[future]
-                                try:
-                                    result1, result2 = future.result()
-                                    resolve_duplicates += result1
-                                    resolve_duplicates_fail += result2
-                                    completed_count += 1
-                                except Exception as e:
-                                    print(f"# Error generating seed {seed_idx}: {e}")
-                                finally:
-                                    progress.update(1)
+                    for future in done:
+                        seed_idx = futures.pop(future)
+                        seed_deadlines.pop(future, None)
+                        try:
+                            result1, result2 = future.result()
+                            resolve_duplicates += result1
+                            resolve_duplicates_fail += result2
+                            completed_count += 1
+                        except Exception as e:
+                            print(f"# Error generating seed {seed_idx}: {e}")
+                        progress.update(1)
+                        if remaining_queue:
+                            _submit(remaining_queue.pop(0))
+            finally:
+                if futures:
+                    force_terminate_workers = True
+                    for future in list(futures):
+                        seed_idx = futures.pop(future)
+                        future.cancel()
+                        retry_seeds.append(seed_idx)
 
-                        if timed_out:
-                            for future in unfinished:
-                                seed_idx = futures[future]
-                                if future.cancel():
-                                    progress.update(1)
-                                timeout_count += 1
-                                print(f"# Seed {seed_idx} timed out ({timeout_seconds}s)")
-                                retry_seeds.append(seed_idx)
-                    finally:
-                        progress.close()
-                finally:
-                    if timed_out:
-                        _terminate_executor_workers(executor)
-                    executor.shutdown(wait=not timed_out, cancel_futures=True)
+                if force_terminate_workers:
+                    _terminate_executor_workers(executor)
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
+                progress.close()
 
             pending_seeds = retry_seeds
             retry_round += 1

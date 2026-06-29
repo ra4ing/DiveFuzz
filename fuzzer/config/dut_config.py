@@ -11,15 +11,57 @@
 # 
 # See the Mulan PSL v2 for more details.
 
-import yaml
 import os
+import re
+import yaml
 from dataclasses import dataclass
 from typing import List, Optional, Union, Dict
 from config.logger_config import get_global_logger
 
 
 config_logger = get_global_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Auto seed_offset detection
+# ---------------------------------------------------------------------------
+
+# Matches seed filenames like "seeds_42_.S", "seeds_42_.elf", "seeds_42_.img"
+_SEED_INDEX_RE = re.compile(r'^seeds_(\d+)_[^/]*\.(S|elf|img)$')
+
+
+def _detect_seed_offset(seeds_output: str, mode: str) -> int:
+    """
+    Scan the output directory for existing seed files and return the next
+    available seed index (max_existing_index + 1).
+
+    Checks both the top-level directory and the img_file/ subdirectory so
+    that partially-compiled batches are handled correctly.
+    """
+    max_index = -1
+
+    for search_dir in [seeds_output, os.path.join(seeds_output, 'img_file')]:
+        if not os.path.isdir(search_dir):
+            continue
+        for fname in os.listdir(search_dir):
+            m = _SEED_INDEX_RE.match(fname)
+            if m:
+                idx = int(m.group(1))
+                if idx > max_index:
+                    max_index = idx
+
+    offset = max_index + 1 if max_index >= 0 else 0
+    if offset > 0:
+        config_logger.info(
+            f"Auto-detected seed_offset={offset} "
+            f"(found existing seeds up to index {max_index} in {seeds_output})"
+        )
+    return offset
+
+
+# ---------------------------------------------------------------------------
 # DUT target config
+# ---------------------------------------------------------------------------
+
 @dataclass
 class DUTTarget:
     name: str
@@ -57,12 +99,16 @@ class DiveFuzzConfig:
 
     # generate mode fields
     seeds_num: int = 10
+    # seed_offset: integer starting index, or "auto" to detect from existing seeds
+    seed_offset: Union[int, str] = 0
     ins_num: int = 200
     is_cva6: bool = False
     is_rv32: bool = False
     bug_filter_enable: bool = True
     jump_enable: bool = True
     stateful_xor_cache: bool = True
+    xor_cache_expected_seeds: Optional[int] = None
+    clean_cache: bool = False
     debug: bool = False
     debug_mode: str = 'FULL'
     debug_all: bool = False
@@ -73,6 +119,11 @@ class DiveFuzzConfig:
         self.seeds_output = os.path.expanduser(self.seeds_output)
         if self.mutate_input:
             self.mutate_input = os.path.expanduser(self.mutate_input)
+        # Resolve "auto" seed_offset to actual integer
+        if isinstance(self.seed_offset, str) and self.seed_offset.lower() == "auto":
+            self.seed_offset = _detect_seed_offset(self.seeds_output, self.mode)
+        elif isinstance(self.seed_offset, str):
+            self.seed_offset = int(self.seed_offset)
 
 # base class for seed config
 @dataclass
