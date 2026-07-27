@@ -98,4 +98,5 @@ class MCProgram:
     observed: list[ObservedReg]
     oracle_spec: dict
     noise_profile: str
+    alias_map: dict = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)

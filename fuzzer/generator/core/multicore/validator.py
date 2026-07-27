@@ -49,6 +49,34 @@ def validate(program: MCProgram) -> None:
     allowed_noise = NoisePool.allowed_instructions(program.noise_profile)
 
     shared = {v.name: v for v in program.shared_vars}
+    # Alias map (logical -> physical): targets must be declared shared vars,
+    # and vars collapsed onto the same physical location must agree on width
+    # and init value (the exporter declares one physical var per group).
+    if program.alias_map:
+        for logical, phys in program.alias_map.items():
+            if logical not in shared:
+                raise ValueError(
+                    f"alias_map key {logical!r} is not a shared var"
+                )
+            if phys not in shared:
+                raise ValueError(
+                    f"alias_map target {phys!r} is not a shared var"
+                )
+        groups: dict = {}
+        for v in program.shared_vars:
+            phys = program.alias_map.get(v.name, v.name)
+            groups.setdefault(phys, []).append(v)
+        for phys, members in groups.items():
+            if len({m.width for m in members}) > 1:
+                raise ValueError(
+                    f"shared vars aliased to {phys!r} disagree on width: "
+                    f"{[(m.name, m.width) for m in members]}"
+                )
+            if len({m.init_value for m in members}) > 1:
+                raise ValueError(
+                    f"shared vars aliased to {phys!r} disagree on init value: "
+                    f"{[(m.name, m.init_value) for m in members]}"
+                )
 
     for hp in program.hart_programs:
         if not hp.modeled_window:

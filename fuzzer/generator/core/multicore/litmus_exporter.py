@@ -70,12 +70,22 @@ def export_litmus(program: MCProgram) -> str:
     lines: list[str] = [f"RISCV {program.name}", ""]
 
     # Init block: shared var declarations + per-hart address register bindings.
+    # The alias map (logical -> physical) collapses shared vars onto physical
+    # locations for same-word aliasing; each physical var is declared once and
+    # every address register binds to its physical name.
+    alias = program.alias_map
     init = ["{"]
+    declared: set[str] = set()
     for v in program.shared_vars:
-        init.append(f" {_ctype(v.width)} {v.name}={v.init_value};")
+        phys = alias.get(v.name, v.name)
+        if phys in declared:
+            continue
+        declared.add(phys)
+        init.append(f" {_ctype(v.width)} {phys}={v.init_value};")
     for hp in program.hart_programs:
         for var, reg in hp.address_regs.items():
-            init.append(f" {hp.hart_id}:{reg}={var};")
+            phys = alias.get(var, var)
+            init.append(f" {hp.hart_id}:{reg}={phys};")
     init.append("}")
     lines.append("\n".join(init))
     lines.append("")

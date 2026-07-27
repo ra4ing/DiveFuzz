@@ -134,10 +134,30 @@ def _check_ordering_randomization() -> None:
     assert seen_varied_fence, "randomize=True never varied fence bits across 40 MP seeds"
 
 
+def _check_aliasing() -> None:
+    # Deterministic programs declare every shared var (identity alias map).
+    det = export_litmus(build_program(0, "SB", "none", random.Random(0)))
+    assert det.count("uint64_t") == 2, (
+        f"deterministic SB should declare 2 vars, got:\n{det}"
+    )
+    # Randomized mode must, across draws, sometimes collapse to one physical
+    # var (same-word alias).
+    seen_alias = False
+    for seed in range(40):
+        prog = build_program(0, "SB", "none", random.Random(seed), randomize=True)
+        validate(prog)
+        if export_litmus(prog).count("uint64_t") == 1:
+            seen_alias = True
+    assert seen_alias, (
+        "randomize=True never produced a same-word alias across 40 SB seeds"
+    )
+
+
 def main() -> None:
     _check_programs()
     _check_randomized()
     _check_ordering_randomization()
+    _check_aliasing()
     hist = _check_histogram_parsing()
     allowed = _check_herd_parsing()
     _check_oracle(allowed, hist)

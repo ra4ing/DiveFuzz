@@ -98,6 +98,19 @@ class GenCtx:
             return ModeledEvent(kind=EventKind.FENCE, pred=pred, succ=succ)
         return ModeledEvent(kind=EventKind.FENCE, pred="rw", succ="rw")
 
+    def alias_map(self, logical_vars: list[str]) -> dict[str, str]:
+        """Map each logical shared var to a physical var name (identity by
+        default). When randomizing, collapse all-but-first onto the first with
+        probability 0.5 -- a same-word alias. herd models the collapsed program
+        on the reduced location set; the DUT executes true same-word accesses
+        (store-forwarding, same-word coherence)."""
+        m = {v: v for v in logical_vars}
+        if self.randomize and len(logical_vars) >= 2 and self.rng.random() < 0.5:
+            first = logical_vars[0]
+            for v in logical_vars[1:]:
+                m[v] = first
+        return m
+
 
 # --------------------------------------------------------------------------- #
 # Event constructors (register-agnostic; store the symbolic var name, the
@@ -530,11 +543,11 @@ def build_program(
         seed_id: Stable seed identifier.
         family: One of :func:`available_families`.
         noise_level: One of the levels supported by :class:`NoisePool`.
-        rng: Seeded RNG (drives noise selection now; register/value/fence/aqrl
-            randomization when ``randomize`` is set).
+        rng: Seeded RNG (drives noise selection now; register/value/fence
+            randomization and address aliasing when ``randomize`` is set).
         randomize: Enable the sound-by-construction axes (register allocation,
-            store values, fence pred/succ, aq/rl bits). Off by default to
-            reproduce the spike-verified seeds.
+            store values, fence pred/succ, same-word aliasing). Off by default
+            to reproduce the spike-verified seeds.
 
     Raises:
         ValueError: for unknown family or unsupported noise level.
@@ -551,4 +564,8 @@ def build_program(
             f"{', '.join(NoisePool.supported_levels())}"
         )
     ctx = GenCtx(rng, randomize)
-    return spec.build(seed_id, ctx, noise_level)
+    program = spec.build(seed_id, ctx, noise_level)
+    # Apply the same-word aliasing axis post-build from the program's shared
+    # vars (no per-family change needed).
+    program.alias_map = ctx.alias_map([v.name for v in program.shared_vars])
+    return program
