@@ -94,8 +94,11 @@ def export_litmus(program: MCProgram) -> str:
     hart_rows: list[list[str]] = []
     for hp in program.hart_programs:
         rows: list[str] = list(hp.prologue_noise)
-        for event in hp.modeled_window:
+        inter = hp.interleave_noise
+        for i, event in enumerate(hp.modeled_window):
             rows.extend(_event_instructions(event, hp.address_regs))
+            if i < len(inter):
+                rows.append(inter[i])
         rows.extend(hp.epilogue_noise)
         hart_rows.append(rows)
 

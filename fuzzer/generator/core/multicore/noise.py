@@ -13,87 +13,133 @@
 
 """Noise instruction pool for multicore test programs.
 
-Noise is inserted around the modeled window to perturb pipeline timing without
-changing the memory-model-allowed outcome set. The pool is the single source
-of truth for which noise instructions are sound at each level: the family
-builder draws from it, and the validator accepts exactly its emitted set.
+Noise perturbs pipeline timing without changing the memory-model-allowed
+outcome set. The pool is the single source of truth for which noise
+instructions are sound: the family builder draws from it, and the validator
+accepts exactly what :meth:`is_safe` permits.
+
+Soundness contract
+------------------
+Every noise instruction writes **only** scratch registers (:data:`SCRATCH`),
+which never appear in any modeled window (they are disjoint from address,
+value, observed, and runtime/reserved registers). Therefore noise is sound
+*anywhere* it is inserted -- prologue, between window events (interleaving),
+or epilogue -- because it cannot influence the window's memory accesses or
+the observed outcome. herd reasons about the modeled window only; noise rows
+outside it are invisible to the allowed-set computation.
 
 Levels (research plan §5)
 -------------------------
 - ``none`` : no noise.
-- ``L0``   : inert instructions (``nop``, ``addi x20,x20,0``). Cannot touch
-  shared memory, observed registers, or the runtime area; the herd allowed set
-  is provably unchanged (verified by the L0 soundness regression).
-- ``L1``/``L2`` : integer compute / private branches / non-trapping supported
-  instructions. **Planned for the randomization phase** -- not yet populated;
-  requesting them raises ``ValueError``.
-
-This module is deliberately structured (not a bare list) so that L1/L2 plug in
-by extending ``_LEVELS`` without touching families or the validator.
+- ``L0``   : inert instructions (``nop``, ``addi x20,x20,0``).
+- ``L1``   : scratch-only integer ALU ops on x20 (``addi``/``slli``/``srli``
+  with random immediates, plus ``add``/``sub``/``and``/``or``/``xor``/``mul``
+  ``x20,x20,x20``). These perturb the ALU/rename pipeline and (when
+  interleaved between window events) separate the loads/stores in time,
+  exposing reordering-sensitive timing. No memory accesses, no branches, no
+  traps. L2 (broader instruction pool, private memory) is deferred.
 """
 
 import random
+import re
 
-from .regalloc import RegAllocator
+# A noise instruction "emitter" turns an rng into one instruction string.
+Emitter = callable
+
+
+def _is_reg(token: str) -> bool:
+    return bool(re.fullmatch(r"x\d+", token))
 
 
 class NoisePool:
     """Sound noise-instruction source, parameterized by level."""
 
-    # Each entry: the literal instruction strings the level may emit at the
-    # default scratch register (x20). L0 reproduces the pre-refactor set verbatim.
-    # L1/L2 are intentionally absent until the randomization phase.
-    _LEVELS: dict[str, tuple[str, ...]] = {
-        "L0": ("nop", "addi x20,x20,0"),
-    }
+    # The single scratch register noise may touch. Disjoint from every other
+    # register role (addr x6/x7, value x12/x13, observed x10/x11, and the
+    # harness/ABI reserved set), so writing it cannot affect any test.
+    SCRATCH: tuple[str, ...] = ("x20",)
+
+    # Mnemonic whitelists for :meth:`is_safe` (register-register and
+    # register-immediate ALU ops that cannot trap).
+    _ALU3 = frozenset({"add", "sub", "and", "or", "xor", "sll", "srl"})
+    _ALU2I = frozenset({"addi", "slli", "srli", "andi", "ori", "xori"})
+
+    @classmethod
+    def _l0_emitters(cls) -> list[Emitter]:
+        return [
+            lambda rng: "nop",
+            lambda rng: "addi x20,x20,0",
+        ]
+
+    @classmethod
+    def _l1_emitters(cls) -> list[Emitter]:
+        s = cls.SCRATCH[0]
+        return [
+            lambda rng: "nop",
+            lambda rng: f"addi {s},{s},{rng.randint(-50, 50)}",
+            lambda rng: f"slli {s},{s},{rng.randint(0, 31)}",
+            lambda rng: f"srli {s},{s},{rng.randint(0, 31)}",
+            lambda rng: f"add {s},{s},{s}",
+            lambda rng: f"sub {s},{s},{s}",
+            lambda rng: f"and {s},{s},{s}",
+            lambda rng: f"or {s},{s},{s}",
+            lambda rng: f"xor {s},{s},{s}",
+        ]
+
+    _EMITTERS: dict[str, classmethod] = {}  # populated below
 
     @classmethod
     def supported_levels(cls) -> tuple[str, ...]:
-        """Levels that actually have a populated instruction pool."""
-        return tuple(cls._LEVELS.keys())
+        """Levels that have a populated emitter pool."""
+        return tuple(cls._EMITTERS.keys())
 
     @classmethod
     def is_supported(cls, level: str) -> bool:
-        return level == "none" or level in cls._LEVELS
+        return level == "none" or level in cls._EMITTERS
 
     @classmethod
-    def allowed_instructions(cls, level: str) -> frozenset[str]:
-        """The exact set of instruction strings the pool may emit at ``level``.
+    def sample(cls, level: str, count: int, rng: random.Random) -> list[str]:
+        """Draw ``count`` noise instructions for ``level``.
 
-        The validator accepts precisely these strings; anything else in a
-        ``*_noise`` list is rejected. ``none`` has no allowed instructions
-        (a noise list must be empty).
+        ``none`` returns ``[]`` (``count`` must be 0). Unknown levels raise.
         """
         if level == "none":
-            return frozenset()
-        if level not in cls._LEVELS:
-            raise ValueError(
-                f"Unsupported noise level: {level!r}. Supported: none, "
-                f"{', '.join(cls._LEVELS)}"
-            )
-        return frozenset(cls._LEVELS[level])
-
-    @classmethod
-    def prologue(
-        cls,
-        level: str,
-        count: int,
-        rng: random.Random,
-        alloc: RegAllocator,
-        hart: int,
-    ) -> list[str]:
-        """Draw ``count`` noise instructions for one hart's prologue.
-
-        ``alloc``/``hart`` are accepted so future levels (L1/L2) can bind
-        per-hart scratch registers via ``alloc.scratch(hart)``; L0 uses the
-        fixed x20 convention and ignores them.
-        """
-        if level == "none":
+            if count:
+                raise ValueError("noise level 'none' cannot take a nonzero count")
             return []
-        if level not in cls._LEVELS:
+        if level not in cls._EMITTERS:
             raise ValueError(
                 f"Unsupported noise level: {level!r}. Supported: none, "
-                f"{', '.join(cls._LEVELS)}"
+                f"{', '.join(cls._EMITTERS)}"
             )
-        pool = cls._LEVELS[level]
-        return [rng.choice(pool) for _ in range(count)]
+        emitters = cls._EMITTERS[level]()
+        return [rng.choice(emitters)(rng) for _ in range(count)]
+
+    @classmethod
+    def is_safe(cls, instr: str) -> bool:
+        """True iff ``instr`` is a permitted noise instruction.
+
+        Permits ``nop`` and the ALU ops whose every register operand is in
+        :data:`SCRATCH`; immediates/shifts are unconstrained. This is the
+        soundness backstop the validator calls for every noise row.
+        """
+        instr = instr.strip()
+        if instr == "nop":
+            return True
+        tokens = [t for t in re.split(r"[,\s]+", instr) if t]
+        if not tokens:
+            return False
+        mnem = tokens[0]
+        regs = [t for t in tokens[1:] if _is_reg(t)]
+        scratch = set(cls.SCRATCH)
+        if mnem in cls._ALU3:
+            return len(regs) == 3 and set(regs) <= scratch
+        if mnem in cls._ALU2I:
+            return len(regs) == 2 and set(regs) <= scratch
+        return False
+
+
+NoisePool._EMITTERS = {
+    "L0": NoisePool._l0_emitters,
+    "L1": NoisePool._l1_emitters,
+}

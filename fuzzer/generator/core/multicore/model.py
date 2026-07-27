@@ -83,6 +83,7 @@ class HartProgram:
     modeled_window: list[ModeledEvent]
     epilogue_noise: list[str]
     result_capture: list[ObservedReg]
+    interleave_noise: list[str] = field(default_factory=list)
 
 
 @dataclass

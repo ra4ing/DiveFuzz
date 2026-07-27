@@ -158,8 +158,9 @@ def _shared_vars(*names: str) -> list[SharedVar]:
 
 
 def _prologue(noise_level: str, ctx: "GenCtx", hart: int) -> list[str]:
-    # One noise instruction per hart prologue (L0 convention).
-    return NoisePool.prologue(noise_level, 1, ctx.rng, ctx.alloc, hart)
+    # Prologue noise count by level: none=0, L0=1 (baseline), L1=2 (stronger).
+    count = {"none": 0, "L0": 1, "L1": 2}.get(noise_level, 0)
+    return NoisePool.sample(noise_level, count, ctx.rng)
 
 
 # --------------------------------------------------------------------------- #
@@ -591,4 +592,12 @@ def build_program(
             else ev
             for ev in hp.modeled_window
         ]
+    # L1 interleaving: one scratch-only noise instruction after each window
+    # event, to separate the loads/stores in time. Sound because noise writes
+    # only x20, which is never live in the modeled window.
+    if noise_level == "L1":
+        for hp in program.hart_programs:
+            hp.interleave_noise = NoisePool.sample(
+                "L1", len(hp.modeled_window), ctx.rng
+            )
     return program

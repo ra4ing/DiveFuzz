@@ -46,7 +46,6 @@ def validate(program: MCProgram) -> None:
             f"hart_count ({program.hart_count}) does not match number of "
             f"hart programs ({len(program.hart_programs)})"
         )
-    allowed_noise = NoisePool.allowed_instructions(program.noise_profile)
 
     shared = {v.name: v for v in program.shared_vars}
     # Alias map (logical -> physical): targets must be declared shared vars,
@@ -124,11 +123,14 @@ def validate(program: MCProgram) -> None:
                     f"'{ev.pred}','{ev.succ}' (must be non-empty subsets of iorw)"
                 )
 
-        for noise in list(hp.prologue_noise) + list(hp.epilogue_noise):
-            if noise not in allowed_noise:
+        for noise in (
+            list(hp.prologue_noise) + list(hp.epilogue_noise)
+            + list(hp.interleave_noise)
+        ):
+            if not NoisePool.is_safe(noise):
                 raise ValueError(
                     f"noise instruction '{noise}' on hart {hp.hart_id} is "
-                    f"not permitted at noise level {program.noise_profile!r}"
+                    f"not permitted (must be a scratch-only ALU op)"
                 )
 
     # Every observed register must be defined by an observing event in its hart.

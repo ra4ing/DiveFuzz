@@ -171,12 +171,23 @@ def _check_width_mixing() -> None:
     )
 
 
+def _check_l1_noise() -> None:
+    # none has no scratch-register noise; L1 emits scratch ALU noise (prologue
+    # + interleaved between window events) and must still validate.
+    det = export_litmus(build_program(0, "SB", "none", random.Random(0)))
+    assert "x20" not in det, "noise=none leaked a scratch-register instruction"
+    prog = build_program(0, "SB", "L1", random.Random(0))
+    validate(prog)
+    assert "x20" in export_litmus(prog), "noise=L1 produced no scratch noise"
+
+
 def main() -> None:
     _check_programs()
     _check_randomized()
     _check_ordering_randomization()
     _check_aliasing()
     _check_width_mixing()
+    _check_l1_noise()
     hist = _check_histogram_parsing()
     allowed = _check_herd_parsing()
     _check_oracle(allowed, hist)

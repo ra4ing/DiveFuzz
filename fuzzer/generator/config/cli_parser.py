@@ -215,9 +215,10 @@ def create_parser():
     parser.add_argument(
         "--noise-level",
         type=str,
-        choices=["none", "L0"],
+        choices=["none", "L0", "L1"],
         default="none",
-        help="Multicore noise level (MVP supports none, L0)",
+        help="Multicore noise level: none, L0 (inert), L1 (scratch ALU + "
+        "interleaving between window events)",
     )
     parser.add_argument(
         "--herd-path",
