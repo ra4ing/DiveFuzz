@@ -1,0 +1,17 @@
+# BOOM V4 Bug Reproduction Config - uses existing seed that triggers the bug
+# Run with: python ../../run_dut.py --config reproduce_bug.yaml
+
+dut_target:
+- name: "BOOM V4 Cosim Bug Reproduction"
+  threads: 1
+  version: boom-v4-main
+  diff_ref: Spike
+  emu_path: /home/ra4ing/workspace/riscv/DiveFuzz/dut/chipyard
+  timeout: 600
+  cmd: bash -c 'p="${1/img_file/elf_file}"; exec ./sims/verilator/simulator-chipyard.harness-MediumBoomV4CosimConfig "${p%.img}.elf"' _ $1
+
+seeds:
+- name: bug_csrrsi_hpmcounter
+  input: dir
+  path: /home/ra4ing/workspace/riscv/DiveFuzz/fuzzer/executor/reproduce/output
+  suffix: img
