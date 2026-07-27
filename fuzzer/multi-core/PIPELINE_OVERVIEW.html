@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>DiveFuzz-MC · 多核内存序模糊测试流水线</title>
+<style>
+  :root{
+    --gen:#2563eb; --gen-bg:#eff6ff;
+    --exp:#7c3aed; --exp-bg:#f5f3ff;
+    --ora:#c2410c; --ora-bg:#fff7ed;
+    --cmp:#0e7490; --cmp-bg:#ecfeff;
+    --run:#16a34a; --run-bg:#f0fdf4;
+    --jud:#dc2626; --jud-bg:#fef2f2;
+    --ink:#0f172a; --mute:#64748b; --line:#94a3b8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;
+    background:#f1f5f9;color:var(--ink);padding:24px 28px 36px;-webkit-font-smoothing:antialiased}
+  .mono{font-family:"SF Mono","JetBrains Mono",Consolas,monospace}
+  .wrap{max-width:1400px;margin:0 auto}
+
+  .hd{background:#0f172a;color:#fff;border-radius:14px;padding:16px 22px;display:flex;
+    align-items:center;justify-content:space-between;gap:22px;flex-wrap:wrap}
+  .hd h1{font-size:18.5px;font-weight:700;letter-spacing:.3px}
+  .hd h1 b{color:#60a5fa}
+  .hd .thesis{font-size:12.5px;background:#1e293b;padding:8px 14px;border-radius:8px;
+    border-left:3px solid #fbbf24;line-height:1.55}
+  .hd .thesis code{color:#fcd34d}
+
+  .entries{display:flex;gap:12px;margin:14px 0 4px}
+  .ent{flex:1;background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:9px 14px;
+    display:flex;align-items:center;gap:12px;font-size:12.3px}
+  .ent .tag{font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:5px;color:#fff;white-space:nowrap}
+  .ent.a .tag{background:#475569}.ent.b .tag{background:#0f766e}
+  .ent code{color:#334155}
+  .ent .stop{margin-left:auto;color:var(--mute);font-size:11px}
+
+  #pipe{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1.4fr;
+        grid-template-rows:auto auto;column-gap:54px;row-gap:74px;
+        position:relative;margin-top:30px;padding:14px 0}
+  .card{background:#fff;border:1px solid #cbd5e1;border-top:4px solid var(--c);
+    border-radius:11px;padding:12px 13px 11px;position:relative;z-index:2;min-height:150px}
+  .card .num{font-size:11px;font-weight:800;color:var(--c);letter-spacing:.5px}
+  .card .ttl{font-size:14px;font-weight:700;margin:1px 0 6px}
+  .card .fn{font-size:10.5px;color:var(--mute);margin-bottom:7px;word-break:break-word;line-height:1.4}
+  .card .fn code{background:#f1f5f9;padding:1px 5px;border-radius:4px;color:#334155}
+  .card ul{list-style:none;font-size:11.1px;line-height:1.58;color:#334155}
+  .card ul li{padding-left:11px;position:relative}
+  .card ul li:before{content:"▸";position:absolute;left:0;color:var(--c);font-size:9px;top:1px}
+  .card .badge{position:absolute;top:-10px;right:11px;background:var(--c-bg);color:var(--c);
+    border:1px solid var(--c);font-size:9.5px;font-weight:700;padding:2px 8px;border-radius:20px;
+    white-space:nowrap;font-family:"SF Mono",Consolas,monospace;z-index:3}
+  .card.gen{--c:var(--gen);--c-bg:var(--gen-bg)}
+  .card.exp{--c:var(--exp);--c-bg:var(--exp-bg)}
+  .card.ora{--c:var(--ora);--c-bg:var(--ora-bg)}
+  .card.cmp{--c:var(--cmp);--c-bg:var(--cmp-bg)}
+  .card.run{--c:var(--run);--c-bg:var(--run-bg)}
+  .card.jud{--c:var(--jud);--c-bg:var(--jud-bg)}
+
+  #c1{grid-column:1;grid-row:1}
+  #c2{grid-column:2;grid-row:1}
+  #c3{grid-column:3;grid-row:1}
+  #c4{grid-column:2;grid-row:2}
+  #c5{grid-column:3;grid-row:2}
+  #c6{grid-column:4;grid-row:2}
+  #c7{grid-column:5;grid-row:1 / span 2;align-self:center}
+
+  #arrows{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:1}
+
+  .tracklbl{position:absolute;font-size:10px;font-weight:800;letter-spacing:1px;
+    text-transform:uppercase;padding:2px 9px;border-radius:5px;color:#fff;z-index:4;white-space:nowrap}
+  #lbl-allow{background:var(--ora)}
+  #lbl-obs{background:var(--run)}
+
+  .ex{background:#fff;border:1px solid #cbd5e1;border-radius:13px;padding:15px 19px;margin-top:24px}
+  .ex h3{font-size:13px;font-weight:700;margin-bottom:11px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .ex h3 .pill{font-size:10px;font-weight:700;padding:2px 9px;border-radius:20px;color:#fff;background:#16a34a}
+  .ex h3 .pill.bad{background:#dc2626}
+  .exgrid{display:grid;gap:13px}
+  .exbox{border:1px solid #cbd5e1;border-radius:9px;padding:10px 12px;background:#fafbfc}
+  .exbox h4{font-size:10.3px;font-weight:800;color:var(--mute);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+  .exbox pre{font-size:10.5px;line-height:1.5;color:#1e293b;white-space:pre;overflow-x:auto}
+  .ok{color:#16a34a;font-weight:700}.bad{color:#dc2626;font-weight:700}
+
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:15px;font-size:11.3px;color:#475569;justify-content:center}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .foot{margin-top:16px;font-size:10.8px;color:var(--mute);text-align:center;line-height:1.6}
+  .foot code{background:#e2e8f0;padding:1px 5px;border-radius:3px;color:#334155}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hd">
+    <h1>DiveFuzz-MC · <b>多核内存序模糊测试</b> 流水线</h1>
+    <div class="thesis">
+      核心命题：DUT 观测到的每次最终寄存器状态，必须落在 <b>RVWMO/herd 允许集</b> 内<br>
+      <code>observed ⊆ allowed ?</code> &nbsp; ✅ SUCCESS &nbsp;|&nbsp; ❌ <b>MODEL_VIOLATION = bug</b>
+    </div>
+  </div>
+
+  <div class="entries">
+    <div class="ent a"><span class="tag">入口 A · 仅生成</span>
+      <code>python -m generator.main --generate --multicore ...</code>
+      <span class="stop">停在 ④，产出 .litmus / .elf / allowed</span></div>
+    <div class="ent b"><span class="tag">入口 B · 全闭环</span>
+      <code>python run_dut.py --config spike_multicore.yaml</code>
+      <span class="stop">①→⑦ 全跑 + 归档</span></div>
+  </div>
+
+  <div id="pipe">
+    <span class="tracklbl" id="lbl-allow">allowed 路径（上）</span>
+    <span class="tracklbl" id="lbl-obs">observed 路径（下）</span>
+
+    <div class="card gen" id="c1">
+      <span class="badge">MCProgram</span>
+      <div class="num">① 生成</div>
+      <div class="ttl">构造测试程序</div>
+      <div class="fn"><code>families.build_program()</code></div>
+      <ul>
+        <li><b>声明式 catalog</b>：SB·LB·MP·MPTSO·CoRR·WRC(3hart)·IRIW(4hart)</li>
+        <li><b>RegAllocator</b> 按角色分寄存器<br>addr <span class="mono">x6/x7</span>·val <span class="mono">x12/13</span>·dst <span class="mono">x10/11</span></li>
+        <li><b>NoisePool</b>：<span class="mono">none / L0</span></li>
+        <li>hart 数 = 族固有属性</li>
+      </ul>
+    </div>
+
+    <div class="card exp" id="c2">
+      <span class="badge">seed.litmus</span>
+      <div class="num">② 导出</div>
+      <div class="ttl">渲染 .litmus</div>
+      <div class="fn"><code>litmus_exporter.export_litmus()</code></div>
+      <ul>
+        <li>RISCV 表格：<span class="mono">P0|P1|…</span> 列 + init 块</li>
+        <li>宽度 <span class="mono">sb/sh/sw/sd</span>+<span class="mono">lb/lh/lw/ld</span></li>
+        <li><code>validator.validate()</code> 先校验：<br>hart 数·噪声∈Pool·observed 由 Load 定义</li>
+      </ul>
+    </div>
+
+    <div class="card ora" id="c3">
+      <span class="badge">allowed.json</span>
+      <div class="num">③ ORACLE</div>
+      <div class="ttl">herd 求允许集</div>
+      <div class="fn"><code>herd_oracle.HerdOracle</code></div>
+      <ul>
+        <li>跑 <span class="mono">herd7 seed.litmus</span></li>
+        <li>解析 <span class="mono">States N</span> → 允许结果集</li>
+        <li>键 <span class="mono">h{hart}.{reg}</span>，与 observed 同套</li>
+        <li><b>不是 difftest · 唯一裁判是 RVWMO</b></li>
+      </ul>
+    </div>
+
+    <div class="card cmp" id="c4">
+      <span class="badge">seed.elf</span>
+      <div class="num">④ 编译</div>
+      <div class="ttl">litmus7 → ELF</div>
+      <div class="fn"><code>litmus_backend.build()</code></div>
+      <ul>
+        <li><span class="mono">litmus7 -mach riscv -mode presi</span> → C</li>
+        <li><span class="mono">gcc</span> + harness 胶水 → 裸机 ELF</li>
+        <li><span class="mono">AVAIL=hart_count</span></li>
+      </ul>
+    </div>
+
+    <div class="card run" id="c5">
+      <span class="badge">stdout</span>
+      <div class="num">⑤ 执行</div>
+      <div class="ttl">DUT 重复运行</div>
+      <div class="fn"><code>runner.run_bundle · _run_once</code></div>
+      <ul>
+        <li><span class="mono">cmd.replace('$1', elf)</span> — <b>DUT 无关</b></li>
+        <li><b>PTY 流式</b>，见 <span class="mono">"Observation"</span> 即终止</li>
+        <li>跑 <span class="mono">runs_per_seed</span> 次，多 bundle 并行</li>
+      </ul>
+    </div>
+
+    <div class="card exp" id="c6">
+      <span class="badge">observed.json</span>
+      <div class="num">⑥ 解析</div>
+      <div class="ttl">直方图聚合</div>
+      <div class="fn"><code>outcome.parse_litmus_histogram()</code></div>
+      <ul>
+        <li>识别 <span class="mono">&lt;n&gt; :&gt; a=0; b=1;</span> 行</li>
+        <li>多次 run <span class="mono">aggregate +=</span> 累加</li>
+        <li>转 canonical：<span class="mono">h{hart}.{reg}</span></li>
+      </ul>
+    </div>
+
+    <div class="card jud" id="c7">
+      <span class="badge">SUCCESS / MODEL_VIOLATION</span>
+      <div class="num">⑦ 判定 JUDGE</div>
+      <div class="ttl">observed ⊆ allowed ?</div>
+      <div class="fn"><code>oracle.classify_outcomes()</code></div>
+      <ul>
+        <li><b>优先级</b>：trap &gt; 直方图 &gt; 超时 &gt; 无结果</li>
+        <li>✅ 全 ∈ allowed → <b class="ok">SUCCESS</b></li>
+        <li>❌ 任一 ∉ allowed → <b class="bad">MODEL_VIOLATION = bug</b></li>
+        <li>非 SUCCESS → <code>archive</code> 保全现场</li>
+      </ul>
+    </div>
+
+    <svg id="arrows" xmlns="http://www.w3.org/2000/svg"></svg>
+  </div>
+
+  <div class="ex">
+    <h3>实例 <span class="pill">SB · 2 hart · SUCCESS</span>同一数据流贯穿 ①→⑦，每格是该阶段真实产物</h3>
+    <div class="exgrid" style="grid-template-columns:1.05fr .95fr 1fr .8fr">
+      <div class="exbox">
+        <h4>② seed.litmus（P0 ‖ P1）</h4>
+<pre>RISCV SB-mc0
+{ uint64_t x=0; uint64_t y=0;
+ 0:x6=x; 0:x7=y; 1:x6=x; 1:x7=y; }
+ P0            | P1 ;
+ ori x12,x0,1  | ori x12,x0,1 ;
+ sd  x12,0(x6) | sd  x12,0(x7) ;
+ ld  x10,0(x7) | ld  x10,0(x6) ;
+exists (0:x10=0 /\ 1:x10=0)</pre>
+      </div>
+      <div class="exbox">
+        <h4>③ allowed（herd · 4 态全允许）</h4>
+<pre>{ "h0.x10":0, "h1.x10":0 }
+{ "h0.x10":0, "h1.x10":1 }
+{ "h0.x10":1, "h1.x10":0 }
+{ "h0.x10":1, "h1.x10":1 }</pre>
+        <div style="font-size:9.7px;color:#64748b;margin-top:4px">SB 无 fence → 全允许</div>
+      </div>
+      <div class="exbox">
+        <h4>⑤⑥ spike 观测直方图</h4>
+<pre>Histogram (2 states)
+200 :> 0:x10=0; 1:x10=1;
+200 :> 0:x10=1; 1:x10=0;
+Observation SB-mc0
+        Sometimes 200 200</pre>
+      </div>
+      <div class="exbox">
+        <h4>⑦ 判定</h4>
+<pre>两态均
+ <b class="ok">∈ allowed</b>
+
+→ <b class="ok">SUCCESS</b></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="ex" style="margin-top:13px">
+    <h3>bug 探测 <span class="pill bad">MP · 带 fence · 观测到禁止态即 bug</span></h3>
+    <div class="exgrid" style="grid-template-columns:1.25fr 1fr 1fr .8fr">
+      <div class="exbox">
+        <h4>② MP 的 P0（release fence）</h4>
+<pre>P0                | P1 ;
+ori x12,x0,1      | ld x10,0(x7) ;  ← ld y
+sd  x12,0(x6)     | ld x11,0(x6) ;  ← ld x
+fence rw,rw       |
+ori x13,x0,1      |
+sd  x13,0(x7)     |</pre>
+      </div>
+      <div class="exbox">
+        <h4>③ allowed（fence 禁止一态）</h4>
+<pre>4 态中 <b class="bad">禁止</b>:
+ {h1.x10:1, h1.x11:0}
+="y 可见 但 x 不可见"
+fence 禁此重排</pre>
+      </div>
+      <div class="exbox">
+        <h4>⑤⑥ 若 DUT 观测到</h4>
+<pre>200 :> 1:x10=1;
+         1:x11=0;</pre>
+      </div>
+      <div class="exbox">
+        <h4>⑦ 判定</h4>
+<pre>{h1.x10:1,
+ h1.x11:0}
+ <b class="bad">∉ allowed</b>
+
+→ <b class="bad">VIOLATION</b>
+→ archive → bug</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i style="background:#2563eb"></i>生成</span>
+    <span><i style="background:#7c3aed"></i>导出</span>
+    <span><i style="background:#c2410c"></i>Oracle herd/RVWMO</span>
+    <span><i style="background:#0e7490"></i>编译</span>
+    <span><i style="background:#16a34a"></i>执行</span>
+    <span><i style="background:#dc2626"></i>判定</span>
+  </div>
+  <div class="foot">
+    生成侧 <code>generator/core/multicore/</code> · 执行侧 <code>executor/multicore/</code> · 胶水 <code>spike-litmus-harness/Makefile</code><br>
+    全流水线 DUT 无关：接入新 DUT 只换 <code>dut_config.cmd</code>（HTIF 类 spike/XiangShan/chipyard 直接复用；NEMU 类换胶水层）
+  </div>
+</div>
+
+<script>
+(function(){
+  const pipe=document.getElementById('pipe');
+  const svg=document.getElementById('arrows');
+  const NS='http://www.w3.org/2000/svg';
+  const COL={c1:'#2563eb',c2:'#7c3aed',c3:'#c2410c',c4:'#0e7490',c5:'#16a34a',c6:'#16a34a'};
+  const C={};
+  function measure(){
+    ['c1','c2','c3','c4','c5','c6','c7'].forEach(id=>{
+      const el=document.getElementById(id); const r=el.getBoundingClientRect(); const p=pipe.getBoundingClientRect();
+      C[id]={x:r.left-p.left, y:r.top-p.top, w:r.width, h:r.height};
+    });
+  }
+  function pt(id,side,frac){
+    frac = (frac==null)?0.5:frac;
+    const c=C[id];
+    switch(side){
+      case 'R': return {x:c.x+c.w, y:c.y+c.h*frac};
+      case 'L': return {x:c.x,     y:c.y+c.h*frac};
+      case 'T': return {x:c.x+c.w*frac, y:c.y};
+      case 'B': return {x:c.x+c.w*frac, y:c.y+c.h};
+    }
+  }
+  let mk=0;
+  function arrowhead(col){
+    const id='ah'+(mk++); const m=document.createElementNS(NS,'marker');
+    m.setAttribute('id',id); m.setAttribute('viewBox','0 0 10 10');
+    m.setAttribute('refX','8.5'); m.setAttribute('refY','5');
+    m.setAttribute('markerWidth','7'); m.setAttribute('markerHeight','7');
+    m.setAttribute('orient','auto');
+    const path=document.createElementNS(NS,'path');
+    path.setAttribute('d','M0,0 L10,5 L0,10 z'); path.setAttribute('fill',col);
+    m.appendChild(path); svg.appendChild(m); return id;
+  }
+  function draw(a,b,col,dash,label){
+    const midx=(a.x+b.x)/2;
+    const d=`M ${a.x},${a.y} C ${midx},${a.y} ${midx},${b.y} ${b.x},${b.y}`;
+    const id=arrowhead(col);
+    const path=document.createElementNS(NS,'path');
+    path.setAttribute('d',d); path.setAttribute('fill','none');
+    path.setAttribute('stroke',col); path.setAttribute('stroke-width','2');
+    if(dash) path.setAttribute('stroke-dasharray',dash);
+    path.setAttribute('marker-end',`url(#${id})`);
+    svg.appendChild(path);
+    if(label){
+      const t=document.createElementNS(NS,'text');
+      t.setAttribute('x',midx);
+      t.setAttribute('y',(a.y+b.y)/2 - 7);
+      t.setAttribute('font-size','10.5'); t.setAttribute('font-family','monospace');
+      t.setAttribute('fill',col); t.setAttribute('font-weight','700');
+      t.setAttribute('text-anchor','middle');
+      t.setAttribute('paint-order','stroke'); t.setAttribute('stroke','#f1f5f9'); t.setAttribute('stroke-width','3');
+      t.textContent=label; svg.appendChild(t);
+    }
+  }
+  function relayout(){
+    svg.innerHTML=''; mk=0; measure();
+    // place track labels
+    const lblA=document.getElementById('lbl-allow'), lblO=document.getElementById('lbl-obs');
+    lblA.style.left=(C.c2.x + 'px'); lblA.style.top=(C.c2.y - 28 + 'px');
+    lblO.style.left=(C.c4.x + 'px'); lblO.style.top=(C.c4.y + C.c4.h + 8 + 'px');
+    // allowed track (top): c1->c2->c3
+    draw(pt('c1','R'),pt('c2','L'),COL.c1,null,null);
+    draw(pt('c2','R'),pt('c3','L'),COL.c2,null,'.litmus');
+    // split down: c2 -> c4
+    draw(pt('c2','B',0.5),pt('c4','T',0.2),COL.c2,'5 4','.litmus');
+    // observed track (bottom): c4->c5->c6
+    draw(pt('c4','R'),pt('c5','L'),COL.c4,null,'seed.elf');
+    draw(pt('c5','R'),pt('c6','L'),COL.c5,null,'stdout');
+    // merge into judge: c3 (allowed, upper) + c6 (observed, lower)
+    draw(pt('c3','R',0.6),pt('c7','L',0.30),COL.c3,'6 4','allowed');
+    draw(pt('c6','R',0.4),pt('c7','L',0.70),COL.c6,'6 4','observed');
+  }
+  window.addEventListener('load',()=>setTimeout(relayout,60));
+  window.addEventListener('resize',relayout);
+})();
+</script>
+</body>
+</html>

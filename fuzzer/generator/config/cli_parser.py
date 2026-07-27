@@ -200,14 +200,17 @@ def create_parser():
     parser.add_argument(
         "--hart-count",
         type=int,
-        default=2,
-        help="Number of harts for multicore seeds (MVP supports 2)",
+        default=None,
+        help="Optional filter: only generate families whose topology requires "
+        "this many harts (e.g. 2, 3, 4). Omit to let each family use its own "
+        "hart count (SB/LB/MP/CoRR/MPTSO=2, WRC=3, IRIW=4).",
     )
     parser.add_argument(
         "--test-family",
         action="append",
         default=None,
-        help="Multicore test family to generate (repeatable); default SB,LB,MP",
+        help="Multicore test family to generate (repeatable); e.g. SB, LB, "
+        "MP, MPTSO, CoRR, WRC, IRIW. Default: SB, LB, MP",
     )
     parser.add_argument(
         "--noise-level",
@@ -244,19 +247,6 @@ def create_parser():
         "--no-build-executable",
         action="store_true",
         help="Skip building the litmus7-compatible ELF (model artifacts only)",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=["litmus", "custom"],
-        default="litmus",
-        help="Multicore executable backend: litmus (litmus7 harness, needs N+1 harts) "
-             "or custom (2-hart bare-metal)",
-    )
-    parser.add_argument(
-        "--custom-harness-dir",
-        type=str,
-        default="multi-core/xs-custom-harness",
-        help="Path to the xs-custom-harness directory for the custom backend",
     )
     return parser
 

@@ -13,14 +13,18 @@
 
 """Static validation of a multicore program.
 
-A valid MVP program is sound to (a) export to ``.litmus`` for the herd oracle
+A valid program is sound to (a) export to ``.litmus`` for the herd oracle
 and (b) build into a litmus7-compatible executable. Anything that cannot be
 proven safe is rejected with a specific ``ValueError``.
 """
 
 from .model import MCProgram, EventKind
+from .noise import NoisePool
 
-# Kinds declared in the model but unsupported by the MVP exporter.
+# Kinds declared in the model but not yet implemented in the exporter.
+# Load/Store/Fence/FenceTso are fully supported. AMO/LR/SC/Dependency/Delay
+# are deferred to the randomization phase (each needs exporter + validator
+# extensions); emitting one now is a programmer error, not a runtime surprise.
 _UNSUPPORTED_KINDS = {
     EventKind.AMO,
     EventKind.LR,
@@ -28,19 +32,18 @@ _UNSUPPORTED_KINDS = {
     EventKind.DEPENDENCY,
     EventKind.DELAY,
 }
-# Noise instructions permitted in the MVP (validated verbatim).
-_ALLOWED_NOISE = {"nop", "addi x20,x20,0"}
 # Kinds whose ``dst`` register defines an observed value.
 _OBSERVING_KINDS = {EventKind.LOAD, EventKind.AMO, EventKind.LR, EventKind.SC}
 
 
 def validate(program: MCProgram) -> None:
-    """Raise ``ValueError`` if ``program`` is not a sound MVP seed."""
+    """Raise ``ValueError`` if ``program`` is not a sound seed."""
     if program.hart_count != len(program.hart_programs):
         raise ValueError(
             f"hart_count ({program.hart_count}) does not match number of "
             f"hart programs ({len(program.hart_programs)})"
         )
+    allowed_noise = NoisePool.allowed_instructions(program.noise_profile)
 
     shared = {v.name: v for v in program.shared_vars}
 
@@ -51,12 +54,14 @@ def validate(program: MCProgram) -> None:
         for ev in hp.modeled_window:
             if ev.kind in _UNSUPPORTED_KINDS:
                 raise ValueError(
-                    f"Modeled event {ev.kind.value} is declared but not "
-                    f"implemented in the MVP exporter"
+                    f"Modeled event {ev.kind.value} is declared but not yet "
+                    f"implemented in the exporter (planned for the "
+                    f"randomization phase)"
                 )
-            if ev.width not in (4, 8):
+            if ev.width not in (1, 2, 4, 8):
                 raise ValueError(
-                    f"event width {ev.width} on hart {hp.hart_id} must be 4 or 8"
+                    f"event width {ev.width} on hart {hp.hart_id} must be "
+                    f"1, 2, 4, or 8"
                 )
             if ev.addr is not None:
                 if ev.addr not in shared:
@@ -79,10 +84,10 @@ def validate(program: MCProgram) -> None:
                 )
 
         for noise in list(hp.prologue_noise) + list(hp.epilogue_noise):
-            if noise not in _ALLOWED_NOISE:
+            if noise not in allowed_noise:
                 raise ValueError(
-                    f"noise instruction '{noise}' on hart {hp.hart_id} is not "
-                    f"permitted in the MVP"
+                    f"noise instruction '{noise}' on hart {hp.hart_id} is "
+                    f"not permitted at noise level {program.noise_profile!r}"
                 )
 
     # Every observed register must be defined by an observing event in its hart.

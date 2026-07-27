@@ -33,15 +33,15 @@ from .model import MCProgram, EventKind, ModeledEvent
 
 
 def _ctype(width: int) -> str:
-    return "uint64_t" if width == 8 else "uint32_t"
+    return {1: "uint8_t", 2: "uint16_t", 4: "uint32_t", 8: "uint64_t"}[width]
 
 
 def _mem_op(width: int) -> str:
-    return "sd" if width == 8 else "sw"
+    return {1: "sb", 2: "sh", 4: "sw", 8: "sd"}[width]
 
 
 def _load_op(width: int) -> str:
-    return "ld" if width == 8 else "lw"
+    return {1: "lb", 2: "lh", 4: "lw", 8: "ld"}[width]
 
 
 def _event_instructions(event: ModeledEvent, address_regs: dict[str, str]) -> list[str]:
@@ -60,8 +60,8 @@ def _event_instructions(event: ModeledEvent, address_regs: dict[str, str]) -> li
     if event.kind is EventKind.FENCE_TSO:
         return ["fence.tso"]
     raise ValueError(
-        f"Modeled event {event.kind.value} is declared but not implemented "
-        f"in the MVP exporter"
+        f"Modeled event {event.kind.value} is declared but not yet "
+        f"implemented in the exporter (planned for the randomization phase)"
     )
 
 

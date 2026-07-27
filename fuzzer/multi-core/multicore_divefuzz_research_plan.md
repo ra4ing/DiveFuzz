@@ -16,10 +16,9 @@
 | 主 oracle | RVWMO/herd model oracle |
 | 判定粒度 | outcome-level checking |
 | difftest | 仅作 smoke/debug/定位辅助 |
-| 首版 backend | litmus7-compatible |
-| 后续 backend | custom ASM runtime |
+| backend | litmus7 |
 
-首版不做：多核 lockstep difftest、OS/pthread、interrupt/VM/vector 混合、随机特权级切换、随机 MMIO/CSR chaos、完整 custom ASM runtime 一步到位。
+首版不做：多核 lockstep difftest、OS/pthread、interrupt/VM/vector 混合、随机特权级切换、随机 MMIO/CSR chaos。
 
 ## 3. 总体流程
 
@@ -68,13 +67,11 @@ Validator 必须保证 seed 可运行且 oracle sound。不能证明安全的 se
 
 关键要求：必须获得完整 allowed outcome 集；普通 `exists` verdict 不能替代 allowed outcomes。
 
-Canonical outcome 使用 JSON，例如 `{"h0.r1":0,"h1.r2":1,"x":1,"y":1}`。custom ASM backend 使用 `DFMC_OUTCOME seed=123 run=7 harts=2 status=ok h0.r1=0 h1.r2=1 x=1 y=1`。litmus7-compatible backend 需将 Histogram/Observation 转为 canonical outcome。
+Canonical outcome 使用 JSON，例如 `{"h0.r1":0,"h1.r2":1,"x":1,"y":1}`。litmus7 backend 将 Histogram/Observation 转为 canonical outcome。
 
 ## 9. Backend 与 Runner
 
-首版 backend：`MCProgram -> .litmus -> litmus7 -> C -> ELF/bin -> XiangShan`。
-
-后续 backend：`MCProgram -> seed.S -> seed.elf/img -> XiangShan`。
+backend：`MCProgram -> .litmus -> litmus7 -> C -> ELF/bin -> DUT`。
 
 XiangShan runner contract：输入 executable、hart_count、runs_per_seed、timeout/max_cycles、metadata；输出 stdout/stderr、returncode、timeout flag、trap flag、parsed outcome、artifact path。runner 必须支持同一 seed 重复运行并生成 histogram。
 
@@ -106,11 +103,7 @@ Reducer 顺序：删 noise -> 删无关 modeled events -> 简化 values -> 简�
 
 交付：Noise L0/L1/L2、寄存器/私有内存分配、noise validator。验收：带噪声 seed 仍保持 oracle sound，XiangShan outcome 可解析。
 
-### Phase 4: Custom ASM backend
-
-交付：多 hart bare-metal runtime、custom linker、DFMC_OUTCOME 输出、seed.S/ELF/img 生成。验收：2-hart/4-hart boot smoke、barrier smoke、SB/LB/MP custom ASM seed PASS。
-
-### Phase 5: Feedback + reducer
+### Phase 4: Feedback + reducer
 
 交付：interaction signature、corpus keep/discard、bug replay、basic reducer。验收：重复 seed 被过滤，new signature/new outcome 被保留，bug archive 可 replay/reduce。
 
@@ -123,4 +116,3 @@ MCProgram validator smoke；SB/LB/MP fixed model oracle；random 2-hart litmus e
 1. herd/RVWMO allowed outcome 获取方式必须先验证。
 2. XiangShan 多核运行入口、hart 数、输出通道必须锁定。
 3. 随机噪声污染 oracle 会导致误报。
-4. custom ASM backend 不阻塞首版闭环。

@@ -143,8 +143,6 @@ class MultiCoreConfig:
     litmus_harness_dir: str = "multi-core/spike-litmus-harness"
     litmus7_path: Optional[str] = None
     litmus7_share: Optional[str] = None
-    backend: str = "litmus"                      # "litmus" | "custom"
-    custom_harness_dir: str = "multi-core/xs-custom-harness"
 
     def __post_init__(self):
         self.seeds_output = os.path.expanduser(self.seeds_output)
@@ -162,9 +160,6 @@ class MultiCoreConfig:
             raise ValueError("litmus_runs must be >= 1")
         if self.litmus_size < 1:
             raise ValueError("litmus_size must be >= 1")
-        self.custom_harness_dir = os.path.expanduser(self.custom_harness_dir)
-        if self.backend not in ("litmus", "custom"):
-            raise ValueError("multicore backend must be 'litmus' or 'custom'")
 
 # base class for seed config
 @dataclass

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from .families import build_program
+from .families import build_program, family_hart_count
 from .validator import validate
 from .litmus_exporter import export_litmus
 from .herd_oracle import HerdOracle
@@ -42,7 +42,6 @@ class MultiCoreGenerationConfig:
     seeds_output: str
     seeds_num: int
     seed_offset: int
-    hart_count: int
     test_families: list[str]
     noise_level: str
     herd_path: str
@@ -51,9 +50,8 @@ class MultiCoreGenerationConfig:
     litmus7_share: str | None
     litmus_runs: int
     litmus_size: int
+    hart_count: int | None = None
     build_executable: bool = True
-    backend: str = "litmus"
-    custom_harness_dir: str = "multi-core/xs-custom-harness"
 
 
 def _to_jsonable(obj):
@@ -84,10 +82,15 @@ def generate_multicore_seed(seed_id: int, config: MultiCoreGenerationConfig) -> 
     family = config.test_families[
         (seed_id - config.seed_offset) % len(config.test_families)
     ]
+    required_harts = family_hart_count(family)
+    if config.hart_count is not None and config.hart_count != required_harts:
+        raise ValueError(
+            f"family {family!r} requires {required_harts} harts but "
+            f"--hart-count={config.hart_count}; drop --hart-count to let each "
+            f"family use its own topology"
+        )
     rng = random.Random(seed_id)
-    program = build_program(
-        seed_id, family, config.hart_count, config.noise_level, rng
-    )
+    program = build_program(seed_id, family, config.noise_level, rng)
     validate(program)
 
     seed_dir = Path(config.seeds_output) / f"seed_{seed_id}"
@@ -111,24 +114,18 @@ def generate_multicore_seed(seed_id: int, config: MultiCoreGenerationConfig) -> 
     # Optionally build the litmus7-compatible executable.
     if config.build_executable:
         out_elf = seed_dir / "seed.elf"
-        if config.backend == "custom":
-            from .custom_backend import CustomAsmBackend
-            CustomAsmBackend(config.custom_harness_dir).build(
-                program, config.litmus_runs, out_elf
-            )
-        else:
-            backend = LitmusExecutableBackend(
-                config.litmus_harness_dir,
-                config.litmus7_path,
-                config.litmus7_share,
-            )
-            backend.build(
-                litmus_path,
-                config.hart_count,
-                config.litmus_runs,
-                config.litmus_size,
-                out_elf,
-            )
+        backend = LitmusExecutableBackend(
+            config.litmus_harness_dir,
+            config.litmus7_path,
+            config.litmus7_share,
+        )
+        backend.build(
+            litmus_path,
+            program.hart_count,
+            config.litmus_runs,
+            config.litmus_size,
+            out_elf,
+        )
         elf_path = out_elf
 
     # Manifest with absolute paths + identifying metadata.
@@ -136,7 +133,7 @@ def generate_multicore_seed(seed_id: int, config: MultiCoreGenerationConfig) -> 
         "seed_id": seed_id,
         "name": program.name,
         "family": program.metadata.get("family", family),
-        "hart_count": config.hart_count,
+        "hart_count": program.hart_count,
         "noise_level": config.noise_level,
         "isa": program.isa,
         "paths": {
@@ -166,6 +163,17 @@ def generate_multicore_seeds(
     config: MultiCoreGenerationConfig, logger=None
 ) -> list[SeedBundle]:
     """Generate ``config.seeds_num`` seeds starting at ``config.seed_offset``."""
+    if config.hart_count is not None:
+        bad = [
+            f for f in config.test_families
+            if family_hart_count(f) != config.hart_count
+        ]
+        if bad:
+            raise ValueError(
+                f"--hart-count={config.hart_count} but family(ies) {bad} "
+                f"require a different hart count; drop --hart-count to let "
+                f"each family use its own topology"
+            )
     bundles: list[SeedBundle] = []
     for i in range(config.seeds_num):
         seed_id = config.seed_offset + i

@@ -242,8 +242,6 @@ def _mc_to_gen_config(mc) -> MultiCoreGenerationConfig:
         litmus_runs=mc.litmus_runs,
         litmus_size=mc.litmus_size,
         build_executable=not mc.gen_only,
-        backend=mc.backend,
-        custom_harness_dir=mc.custom_harness_dir,
     )
 
 

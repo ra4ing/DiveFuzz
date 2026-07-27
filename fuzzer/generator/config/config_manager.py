@@ -108,7 +108,7 @@ class Config:
 
         # Multicore (DiveFuzz-MC) configuration
         self.multicore_enable = bool(getattr(args, "multicore", False))
-        self.hart_count = int(getattr(args, "hart_count", 2))
+        self.hart_count = getattr(args, "hart_count", None)
         raw_families = getattr(args, "test_family", None)
         self.test_families = list(raw_families) if raw_families else ["SB", "LB", "MP"]
         self.noise_level = str(getattr(args, "noise_level", "none"))
@@ -117,10 +117,6 @@ class Config:
         self.litmus_runs = int(getattr(args, "litmus_runs", 20))
         self.litmus_size = int(getattr(args, "litmus_size", 20))
         self.build_executable = not bool(getattr(args, "no_build_executable", False))
-        self.backend = str(getattr(args, "backend", "litmus"))
-        self.custom_harness_dir = str(
-            getattr(args, "custom_harness_dir", "multi-core/xs-custom-harness")
-        )
 
 
 def setup_config(args):

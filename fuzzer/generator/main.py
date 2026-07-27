@@ -69,8 +69,6 @@ def main():
             litmus_runs=config.litmus_runs,
             litmus_size=config.litmus_size,
             build_executable=config.build_executable,
-            backend=config.backend,
-            custom_harness_dir=config.custom_harness_dir,
         )
         generate_multicore_seeds(gen_config, logger=logger)
         return

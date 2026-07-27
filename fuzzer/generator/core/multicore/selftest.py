@@ -22,57 +22,36 @@ classification.
 import random
 from collections import Counter
 
-from .families import build_program
+from .families import build_program, available_families
 from .validator import validate
 from .litmus_exporter import export_litmus
 from .outcome import parse_litmus_histogram, parse_herd_states
-from .asm_exporter import export_asm, export_meta
 
 from executor.multicore.oracle import classify_outcomes
 from utils.results_reporter import ResultType
 
 
 def _check_programs() -> None:
-    for family in ("SB", "LB", "MP"):
+    for family in available_families():
         for noise in ("none", "L0"):
             rng = random.Random(42)
-            program = build_program(0, family, 2, noise, rng)
+            program = build_program(0, family, noise, rng)
             validate(program)
             litmus = export_litmus(program)
-            for token in ("RISCV", "P0", "P1", "exists", "sd", "ld"):
+            # Every hart must appear as a process column P0..P{N-1}.
+            for h in range(program.hart_count):
+                assert f"P{h}" in litmus, (
+                    f"{family}/{noise}: litmus missing column P{h}"
+                )
+            for token in ("RISCV", "exists", "sd", "ld"):
                 assert token in litmus, (
                     f"{family}/{noise}: litmus missing token '{token}'"
                 )
-
-
-def _check_asm_export() -> None:
-    """The custom-backend asm/meta export must be well-formed for SB/LB/MP."""
-    for family in ("SB", "LB", "MP"):
-        rng = random.Random(42)
-        program = build_program(0, family, 2, "none", rng)
-        validate(program)
-
-        asm = export_asm(program)
-        for token in (
-            "litmus_P0", "litmus_P1", "dfmc_init",
-            "la x6, dfmc_var_0", "la x7, dfmc_var_1",
-            "sd", "ld", "dfmc_obs_flat", "ret",
-        ):
-            assert token in asm, (
-                f"{family}: asm export missing token '{token}'"
-            )
-
-        meta = export_meta(program)
-        assert f"#define DFMC_NAME \"{program.name}\"" in meta, (
-            f"{family}: meta missing DFMC_NAME"
-        )
-        assert f"#define DFMC_NHART {program.hart_count}" in meta, (
-            f"{family}: meta missing DFMC_NHART"
-        )
-        assert f"#define DFMC_NOBS_TOTAL {len(program.observed)}" in meta, (
-            f"{family}: DFMC_NOBS_TOTAL mismatch "
-            f"(expected {len(program.observed)})"
-        )
+            # Fence families must render their barrier.
+            if family == "MP":
+                assert "fence rw,rw" in litmus, f"{family}: missing fence"
+            elif family == "MPTSO":
+                assert "fence.tso" in litmus, f"{family}: missing fence.tso"
 
 
 def _check_histogram_parsing() -> Counter:
@@ -119,7 +98,6 @@ def _check_oracle(allowed: set, hist: Counter) -> None:
 
 def main() -> None:
     _check_programs()
-    _check_asm_export()
     hist = _check_histogram_parsing()
     allowed = _check_herd_parsing()
     _check_oracle(allowed, hist)

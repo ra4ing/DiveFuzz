@@ -13,9 +13,10 @@
 
 """DiveFuzz-MC multicore seed generator (litmus7-compatible backend).
 
-This package generates model-checkable 2-hart multicore RISC-V test programs,
-exports them to ``.litmus`` form, queries the RVWMO/herd oracle for allowed
-outcomes, and (optionally) builds a litmus7-compatible executable.
+This package generates model-checkable multicore RISC-V test programs across a
+declarative family catalog (2/3/4-hart topologies), exports them to ``.litmus``
+form, queries the RVWMO/herd oracle for allowed outcomes, and (optionally)
+builds a litmus7-compatible executable.
 """
 
 from .model import (
@@ -26,7 +27,15 @@ from .model import (
     HartProgram,
     MCProgram,
 )
-from .families import build_program
+from .families import (
+    FamilySpec,
+    available_families,
+    build_program,
+    family_hart_count,
+    families_for_hart_count,
+)
+from .regalloc import RegAllocator, RegAllocError
+from .noise import NoisePool
 from .validator import validate
 from .litmus_exporter import export_litmus
 from .outcome import (
@@ -52,6 +61,13 @@ __all__ = [
     "HartProgram",
     "MCProgram",
     "build_program",
+    "FamilySpec",
+    "available_families",
+    "family_hart_count",
+    "families_for_hart_count",
+    "RegAllocator",
+    "RegAllocError",
+    "NoisePool",
     "validate",
     "export_litmus",
     "canonical_key",
