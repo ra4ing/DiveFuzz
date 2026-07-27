@@ -190,6 +190,74 @@ def create_parser():
         help="Disable FPR (floating-point registers) logging in debug output",
     )
 
+
+    # —— Multicore (DiveFuzz-MC) options ——
+    parser.add_argument(
+        "--multicore",
+        action="store_true",
+        help="Enable multicore seed generation (DiveFuzz-MC); supports --generate only",
+    )
+    parser.add_argument(
+        "--hart-count",
+        type=int,
+        default=2,
+        help="Number of harts for multicore seeds (MVP supports 2)",
+    )
+    parser.add_argument(
+        "--test-family",
+        action="append",
+        default=None,
+        help="Multicore test family to generate (repeatable); default SB,LB,MP",
+    )
+    parser.add_argument(
+        "--noise-level",
+        type=str,
+        choices=["none", "L0"],
+        default="none",
+        help="Multicore noise level (MVP supports none, L0)",
+    )
+    parser.add_argument(
+        "--herd-path",
+        type=str,
+        default="herd7",
+        help="Path to the herd7 executable used as the RVWMO oracle",
+    )
+    parser.add_argument(
+        "--litmus-harness-dir",
+        type=str,
+        default="multi-core/spike-litmus-harness",
+        help="Path to the spike-litmus-harness directory for ELF compilation",
+    )
+    parser.add_argument(
+        "--litmus-runs",
+        type=int,
+        default=20,
+        help="NUMBER_OF_RUN passed to the litmus7 harness",
+    )
+    parser.add_argument(
+        "--litmus-size",
+        type=int,
+        default=20,
+        help="SIZE_OF_TEST passed to the litmus7 harness",
+    )
+    parser.add_argument(
+        "--no-build-executable",
+        action="store_true",
+        help="Skip building the litmus7-compatible ELF (model artifacts only)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["litmus", "custom"],
+        default="litmus",
+        help="Multicore executable backend: litmus (litmus7 harness, needs N+1 harts) "
+             "or custom (2-hart bare-metal)",
+    )
+    parser.add_argument(
+        "--custom-harness-dir",
+        type=str,
+        default="multi-core/xs-custom-harness",
+        help="Path to the xs-custom-harness directory for the custom backend",
+    )
     return parser
 
 

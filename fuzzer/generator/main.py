@@ -18,6 +18,7 @@ from .config.cli_parser import parse_args
 from .config.config_manager import setup_config
 from .core.generator import generate_instructions_parallel
 from .core.mutator import mutate_instructions_parallel
+from .core.multicore import generate_multicore_seeds, MultiCoreGenerationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,31 @@ def write_isa_info(out_dir: str, isa: str, arch_bits: int):
 def main():
     args = parse_args()
     config = setup_config(args)
+
+    if config.mutation_enable and config.multicore_enable:
+        raise ValueError("--multicore supports --generate only")
+
+    if config.generate_enable and config.multicore_enable:
+        gen_config = MultiCoreGenerationConfig(
+            seeds_output=str(config.out_dir),
+            seeds_num=config.seed_times,
+            seed_offset=config.seed_offset,
+            hart_count=config.hart_count,
+            test_families=config.test_families,
+            noise_level=config.noise_level,
+            herd_path=config.herd_path,
+            litmus_harness_dir=config.litmus_harness_dir,
+            litmus7_path=None,
+            litmus7_share=None,
+            litmus_runs=config.litmus_runs,
+            litmus_size=config.litmus_size,
+            build_executable=config.build_executable,
+            backend=config.backend,
+            custom_harness_dir=config.custom_harness_dir,
+        )
+        generate_multicore_seeds(gen_config, logger=logger)
+        return
+
 
     if config.generate_enable:
         # Build debug configuration if debug mode is enabled

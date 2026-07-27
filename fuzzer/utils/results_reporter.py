@@ -23,6 +23,11 @@ class ResultType(Enum):
     FAILURE = auto()
     TIMEOUT = auto()
     ERROR = auto()
+    MODEL_VIOLATION = auto()
+    RUNTIME_TRAP = auto()
+    NO_OUTCOME = auto()
+    MALFORMED_OUTCOME = auto()
+    INFRA_ERROR = auto()
 
 # ANSI Color Codes
 
@@ -82,8 +87,18 @@ def strip_ansi_codes(s) -> str:
 
 
 class TestResult:
-    def __init__(self, dut_name, version, diff_ref, seed_name,
-                 result_type, summary, log_path):
+    def __init__(
+        self,
+        dut_name,
+        version,
+        diff_ref,
+        seed_name,
+        result_type,
+        summary,
+        log_path,
+        seed_path=None,
+        artifacts=None,
+    ):
         self.dut_name = dut_name
         self.version = version
         self.diff_ref = diff_ref
@@ -91,6 +106,8 @@ class TestResult:
         self.result_type = result_type
         self.summary = summary
         self.log_path = log_path
+        self.seed_path = seed_path
+        self.artifacts = artifacts or {}
 
 
 def generate_report_block(content_lines, color):
@@ -139,7 +156,12 @@ def generate_result_report(test_result, logger):
         ResultType.SUCCESS: TermColor.success,
         ResultType.FAILURE: TermColor.error,
         ResultType.TIMEOUT: TermColor.warning,
-        ResultType.ERROR: TermColor.error
+        ResultType.ERROR: TermColor.error,
+        ResultType.MODEL_VIOLATION: TermColor.error,
+        ResultType.RUNTIME_TRAP: TermColor.error,
+        ResultType.NO_OUTCOME: TermColor.warning,
+        ResultType.MALFORMED_OUTCOME: TermColor.error,
+        ResultType.INFRA_ERROR: TermColor.error,
     }
 
     # Get the result color function
@@ -162,7 +184,7 @@ def generate_result_report(test_result, logger):
         symbol = "⚠"
         status = f"{symbol} Timeout!"
         status_line = TermColor.warning(status)
-    else:  # FAILURE or ERROR
+    else:  # FAILURE, ERROR, MODEL_VIOLATION, RUNTIME_TRAP, NO_OUTCOME, MALFORMED_OUTCOME, INFRA_ERROR
         symbol = "✗"
         status = f"{symbol} Failed!"
         status_line = TermColor.error(status)

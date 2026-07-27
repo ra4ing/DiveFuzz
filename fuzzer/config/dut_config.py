@@ -14,7 +14,7 @@
 import os
 import re
 import yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Union, Dict
 from config.logger_config import get_global_logger
 
@@ -125,6 +125,47 @@ class DiveFuzzConfig:
         elif isinstance(self.seed_offset, str):
             self.seed_offset = int(self.seed_offset)
 
+# multicore seed input config
+@dataclass
+class MultiCoreConfig:
+    gen_only: bool
+    threads: int
+    seeds_output: str
+    seeds_num: int = 10
+    seed_offset: Union[int, str] = 0
+    hart_count: int = 2
+    runs_per_seed: int = 1
+    litmus_runs: int = 20
+    litmus_size: int = 20
+    test_families: List[str] = field(default_factory=lambda: ["SB", "LB", "MP"])
+    noise_level: str = "none"
+    herd_path: str = "herd7"
+    litmus_harness_dir: str = "multi-core/spike-litmus-harness"
+    litmus7_path: Optional[str] = None
+    litmus7_share: Optional[str] = None
+    backend: str = "litmus"                      # "litmus" | "custom"
+    custom_harness_dir: str = "multi-core/xs-custom-harness"
+
+    def __post_init__(self):
+        self.seeds_output = os.path.expanduser(self.seeds_output)
+        self.litmus_harness_dir = os.path.expanduser(self.litmus_harness_dir)
+        # Resolve seed_offset: "auto" detects from existing seeds, else int
+        if isinstance(self.seed_offset, str) and self.seed_offset.lower() == "auto":
+            self.seed_offset = _detect_seed_offset(self.seeds_output, "multicore")
+        elif isinstance(self.seed_offset, str):
+            self.seed_offset = int(self.seed_offset)
+        if self.hart_count < 2:
+            raise ValueError("Only hart_count>=2 is supported for multicore mode")
+        if self.runs_per_seed < 1:
+            raise ValueError("runs_per_seed must be >= 1")
+        if self.litmus_runs < 1:
+            raise ValueError("litmus_runs must be >= 1")
+        if self.litmus_size < 1:
+            raise ValueError("litmus_size must be >= 1")
+        self.custom_harness_dir = os.path.expanduser(self.custom_harness_dir)
+        if self.backend not in ("litmus", "custom"):
+            raise ValueError("multicore backend must be 'litmus' or 'custom'")
+
 # base class for seed config
 @dataclass
 class SeedConfigBase:
@@ -149,6 +190,12 @@ class DirSeedConfig(PredefinedSeedConfig):
 class GeneratedSeedConfig(SeedConfigBase):
     input_type: str
     divefuzz: DiveFuzzConfig
+
+# multicore seed input config
+@dataclass
+class MultiCoreSeedConfig(SeedConfigBase):
+    input_type: str
+    multicore: MultiCoreConfig
 
 # main config parser
 @dataclass
@@ -178,6 +225,12 @@ class Config:
                         name=seed_cfg['name'],
                         path=seed_cfg['path']
                     ))
+            elif seed_cfg.get("input") == "multicore" and "multicore" in seed_cfg:
+                seeds.append(MultiCoreSeedConfig(
+                    name=seed_cfg["name"],
+                    input_type="multicore",
+                    multicore=MultiCoreConfig(**seed_cfg["multicore"]),
+                ))
             elif 'divefuzz' in seed_cfg:
                 seeds.append(GeneratedSeedConfig(
                     name=seed_cfg['name'],

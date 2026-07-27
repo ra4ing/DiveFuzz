@@ -18,8 +18,9 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 from config.logger_config import create_test_logger
-from config.dut_config import Config, DUTTarget, DirSeedConfig, GeneratedSeedConfig, SeedConfigBase
+from config.dut_config import Config, DUTTarget, DirSeedConfig, GeneratedSeedConfig, MultiCoreSeedConfig, SeedConfigBase
 from executor.divefuzz_adapter import setup_divefuzz, run_divefuzz
+from executor.multicore.runner import run_multicore_test
 from utils.results_reporter import TestResult, ResultType, format_duration, generate_result_report, generate_summary_report
 
 logging.basicConfig(
@@ -79,7 +80,8 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
                 seed_name=seed_name,
                 result_type=result_type,
                 summary=summary,
-                log_path=seed_log_path
+                log_path=seed_log_path,
+                seed_path=seed_path,
             )
             
         except subprocess.TimeoutExpired as e:
@@ -92,7 +94,8 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
                 seed_name=seed_name,
                 result_type=ResultType.TIMEOUT,
                 summary=f"Timeout expired ({dut_config.timeout}s)",
-                log_path=seed_log_path
+                log_path=seed_log_path,
+                seed_path=seed_path,
             )
         except Exception as e:
             error_msg = f"Unexpected error during test execution: {e} - Seed: {seed_name}"
@@ -104,7 +107,8 @@ def run_single_seed(seed_path: str, seed_name: str, dut_config: DUTTarget, seed_
                 seed_name=seed_name,
                 result_type=ResultType.ERROR,
                 summary=f"Unexpected error: {str(e)}",
-                log_path=seed_log_path
+                log_path=seed_log_path,
+                seed_path=seed_path,
             )
         finally:
             # Clean up logger handlers
@@ -122,6 +126,11 @@ def run_single_test(dut_config: DUTTarget, seed_config: SeedConfigBase, config_f
         test_logger.info(f"DUT version: {dut_config.version}")
         test_logger.info(f"Diff reference: {dut_config.diff_ref}")
         
+        # Handle multicore seeds (own generation + execution path)
+        if isinstance(seed_config, MultiCoreSeedConfig):
+            test_logger.info(f"Seed mode: multicore (output: {seed_config.multicore.seeds_output})")
+            return run_multicore_test(dut_config, seed_config, config_filename, test_logger)
+
         # Collect all seed files for this configuration
         seed_files = []
         try:
@@ -216,9 +225,14 @@ def run_dut_tests(config: Config, config_filename: str) -> list[TestResult]:
     
     # Generate summary report
     passed = sum(1 for r in total_results if r.result_type == ResultType.SUCCESS)
-    failed = sum(1 for r in total_results if r.result_type == ResultType.FAILURE)
+    failed = sum(1 for r in total_results if r.result_type in {
+        ResultType.FAILURE, ResultType.MODEL_VIOLATION, ResultType.RUNTIME_TRAP,
+        ResultType.NO_OUTCOME, ResultType.MALFORMED_OUTCOME,
+    })
     timeouts = sum(1 for r in total_results if r.result_type == ResultType.TIMEOUT)
-    errors = sum(1 for r in total_results if r.result_type == ResultType.ERROR)
+    errors = sum(1 for r in total_results if r.result_type in {
+        ResultType.ERROR, ResultType.INFRA_ERROR,
+    })
     total = len(total_results)
     
     generate_summary_report(

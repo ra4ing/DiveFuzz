@@ -1,0 +1,31 @@
+# DiveFuzz-MC spike multicore closure config
+# spike is the reference simulator for the litmus7 harness (multi-hart via -p3,
+# HTIF histogram output). The generated ELF runs on spike; the runner detects
+# the litmus "Observation" completion marker and terminates spike (which hangs
+# after printing results).
+dut_target:
+- name: "Spike MultiCore Smoke"
+  threads: 2
+  version: spike
+  diff_ref: spike
+  emu_path: /tmp
+  cmd: /home/ra4ing/workspace/riscv/bin/spike -p3 $1
+  timeout: 60
+
+seeds:
+- name: divefuzz_mc_spike_smoke
+  input: multicore
+  multicore:
+    gen_only: false
+    threads: 2
+    seeds_output: /tmp/dfmc-run_dut
+    seeds_num: 3
+    seed_offset: 0
+    hart_count: 2
+    runs_per_seed: 1
+    litmus_runs: 20
+    litmus_size: 20
+    test_families: ["SB", "LB", "MP"]
+    noise_level: "none"
+    herd_path: /home/ra4ing/.opam/default/bin/herd7
+    litmus_harness_dir: /home/ra4ing/workspace/riscv/DiveFuzz/fuzzer/multi-core/spike-litmus-harness
