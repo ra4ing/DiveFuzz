@@ -43,7 +43,7 @@ Delay families are deferred (they need exporter + validator extensions).
 """
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from .model import EventKind, HartProgram, MCProgram, ModeledEvent, ObservedReg, SharedVar
@@ -63,6 +63,10 @@ _VALUE_MAX = 127
 # Fence pred/succ subsets restricted to data-memory bits {r,w}; the i/o bits
 # are for device memory and irrelevant to coherence testing.
 _FENCE_BIT_CHOICES = ("r", "w", "rw")
+
+# Access widths (bytes) for width mixing. Store values are in [_VALUE_MIN,
+# _VALUE_MAX] so they fit any width, including 1 byte.
+_ACCESS_WIDTHS = (1, 2, 4, 8)
 
 
 class GenCtx:
@@ -110,6 +114,15 @@ class GenCtx:
             for v in logical_vars[1:]:
                 m[v] = first
         return m
+
+    def access_width(self) -> int:
+        """Access width in bytes for a memory op. Default 8; when randomizing,
+        an independent draw from {1, 2, 4, 8}. Sound: herd7 models sub-word
+        coherence; the exporter renders sb/sh/sw/sd and lb/lh/lw/ld, and store
+        values fit any width."""
+        if self.randomize:
+            return self.rng.choice(_ACCESS_WIDTHS)
+        return _WIDTH
 
 
 # --------------------------------------------------------------------------- #
@@ -544,10 +557,11 @@ def build_program(
         family: One of :func:`available_families`.
         noise_level: One of the levels supported by :class:`NoisePool`.
         rng: Seeded RNG (drives noise selection now; register/value/fence
-            randomization and address aliasing when ``randomize`` is set).
+            randomization, address aliasing, and width mixing when
+            ``randomize`` is set).
         randomize: Enable the sound-by-construction axes (register allocation,
-            store values, fence pred/succ, same-word aliasing). Off by default
-            to reproduce the spike-verified seeds.
+            store values, fence pred/succ, same-word aliasing, access-width
+            mixing). Off by default to reproduce the spike-verified seeds.
 
     Raises:
         ValueError: for unknown family or unsupported noise level.
@@ -568,4 +582,13 @@ def build_program(
     # Apply the same-word aliasing axis post-build from the program's shared
     # vars (no per-family change needed).
     program.alias_map = ctx.alias_map([v.name for v in program.shared_vars])
+    # Width-mixing axis: re-width each Load/Store event from the rng.
+    # ModeledEvent is frozen, so rebuild via dataclasses.replace.
+    for hp in program.hart_programs:
+        hp.modeled_window = [
+            replace(ev, width=ctx.access_width())
+            if ev.kind in (EventKind.LOAD, EventKind.STORE)
+            else ev
+            for ev in hp.modeled_window
+        ]
     return program

@@ -153,11 +153,30 @@ def _check_aliasing() -> None:
     )
 
 
+def _check_width_mixing() -> None:
+    # Deterministic programs use width 8 only (sd/ld).
+    det = export_litmus(build_program(0, "SB", "none", random.Random(0)))
+    assert " sd " in det and " ld " in det, "deterministic SB should use sd/ld"
+    assert not any(op in det for op in (" sb ", " sh ", " sw ", " lb ", " lh ", " lw ")), (
+        "deterministic SB leaked a narrow access"
+    )
+    # Randomized mode must, across draws, produce at least one narrow access.
+    seen_narrow = False
+    for seed in range(40):
+        lit = export_litmus(build_program(0, "SB", "none", random.Random(seed), randomize=True))
+        if any(op in lit for op in (" sb ", " sh ", " sw ", " lb ", " lh ", " lw ")):
+            seen_narrow = True
+    assert seen_narrow, (
+        "randomize=True never produced a narrow access across 40 SB seeds"
+    )
+
+
 def main() -> None:
     _check_programs()
     _check_randomized()
     _check_ordering_randomization()
     _check_aliasing()
+    _check_width_mixing()
     hist = _check_histogram_parsing()
     allowed = _check_herd_parsing()
     _check_oracle(allowed, hist)
