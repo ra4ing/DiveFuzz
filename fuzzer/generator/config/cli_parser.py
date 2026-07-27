@@ -248,6 +248,12 @@ def create_parser():
         action="store_true",
         help="Skip building the litmus7-compatible ELF (model artifacts only)",
     )
+    parser.add_argument(
+        "--randomize",
+        action="store_true",
+        help="Enable sound-by-construction randomization axes (register "
+        "allocation, store values). Off by default to reproduce verified seeds.",
+    )
     return parser
 
 

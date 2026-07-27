@@ -52,6 +52,7 @@ class MultiCoreGenerationConfig:
     litmus_size: int
     hart_count: int | None = None
     build_executable: bool = True
+    randomize: bool = False
 
 
 def _to_jsonable(obj):
@@ -90,7 +91,7 @@ def generate_multicore_seed(seed_id: int, config: MultiCoreGenerationConfig) -> 
             f"family use its own topology"
         )
     rng = random.Random(seed_id)
-    program = build_program(seed_id, family, config.noise_level, rng)
+    program = build_program(seed_id, family, config.noise_level, rng, randomize=config.randomize)
     validate(program)
 
     seed_dir = Path(config.seeds_output) / f"seed_{seed_id}"
@@ -135,6 +136,7 @@ def generate_multicore_seed(seed_id: int, config: MultiCoreGenerationConfig) -> 
         "family": program.metadata.get("family", family),
         "hart_count": program.hart_count,
         "noise_level": config.noise_level,
+        "randomize": config.randomize,
         "isa": program.isa,
         "paths": {
             "seed_dir": str(seed_dir.resolve()),

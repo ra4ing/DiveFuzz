@@ -14,21 +14,33 @@
 """Declarative catalog of multicore test families.
 
 Each family is a ``FamilySpec``: a named topology (hart count, value semantics)
-plus a builder that turns a seed id + noise level + rng into a concrete
-``MCProgram``. Builders are register-agnostic -- they obtain every physical
-register from a ``RegAllocator`` and every noise instruction from a
-``NoisePool``, so family topology stays decoupled from register/noise choice.
-That decoupling is the seam the randomization phase will exercise.
+plus a builder that turns a seed id + generation context + noise level into a
+concrete ``MCProgram``. Builders are register- and value-agnostic -- they
+obtain every physical register from ``ctx.alloc`` and every store value from
+``ctx.store_value()``, so family topology stays decoupled from the randomization
+choices. That decoupling is the seam every randomization axis threads through.
 
 Hart count is a property of the family, not a global knob: SB is defined as a
 2-hart topology, WRC as 3-hart, IRIW as 4-hart. Generating an N-hart test means
-selecting a family whose topology requires N harts. Parametric "same family at
-arbitrary hart count" is a randomization-axis concern (planned, not here).
+selecting a family whose topology requires N harts.
 
-All families in this catalog use only Load/Store/Fence/FenceTso events, which
-the exporter and validator fully support. AMO/LR/SC/Dependency/Delay families
-are deferred to the randomization phase (they need exporter + validator
-extensions).
+Randomization axes live in :class:`GenCtx`. Today two sound-by-construction
+axes are wired:
+
+- **register allocation** (axis 5): ``ctx.alloc = RegAllocator(rng)`` shuffles
+  the per-role pools. Sound because the memory model is invariant under
+  register renaming -- herd recomputes the allowed set on the renamed litmus
+  and the runner observes the same renamed keys.
+- **store values** (axis 4): ``ctx.store_value()`` returns a small nonzero
+  immediate. Sound because every catalog family is value-insensitive (the
+  interesting predicate is ordering/visibility, not the magnitude); herd
+  recomputes the allowed set on the new immediates.
+
+Deterministic mode (``randomize=False``, the default) reproduces the
+spike-verified seeds byte-for-byte.
+
+All families use only Load/Store/Fence/FenceTso events. AMO/LR/SC/Dependency/
+Delay families are deferred (they need exporter + validator extensions).
 """
 
 import random
@@ -42,6 +54,42 @@ from .regalloc import RegAllocator
 # Width of the shared vars (bytes); 8 -> sd/ld, uint64_t.
 _WIDTH = 8
 _ISA = "rv64gc"
+
+# Bounds for randomized store values. The upper bound fits ``ori``'s 12-bit
+# immediate (so the exporter's `ori reg,x0,V` materializes it in one insn) and
+# a byte access width (so width-mixing, a later axis, stays sound).
+_VALUE_MIN = 1
+_VALUE_MAX = 127
+
+
+class GenCtx:
+    """Per-seed generation context: the single seam for every randomization axis.
+
+    Family builders never read a toggle directly -- they ask the context for a
+    register allocator (``ctx.alloc``), a store value (``ctx.store_value()``),
+    and the rng (``ctx.rng``). Enabling or adding an axis changes only this
+    class, never the builders.
+    """
+
+    def __init__(self, rng: random.Random, randomize: bool):
+        self.rng = rng
+        self.randomize = randomize
+        # RegAllocator is stateful across the whole program build, so construct
+        # it once. Shuffling the per-role pools is sound (disjoint, RESERVED
+        # excluded); renaming is a memory-model bijection.
+        self.alloc = RegAllocator(rng if randomize else None)
+
+    def store_value(self) -> int:
+        """A value to store into a shared variable.
+
+        Deterministic default is 1 (preserves the spike-verified seeds). When
+        randomizing, an independent draw from ``[_VALUE_MIN, _VALUE_MAX]``;
+        every catalog family is value-insensitive, so this never changes the
+        *topology* of the allowed-outcome set, only the concrete immediates.
+        """
+        if self.randomize:
+            return self.rng.randint(_VALUE_MIN, _VALUE_MAX)
+        return 1
 
 
 # --------------------------------------------------------------------------- #
@@ -78,36 +126,38 @@ def _shared_vars(*names: str) -> list[SharedVar]:
     return [SharedVar(n, 0, _WIDTH, _WIDTH) for n in names]
 
 
-def _prologue(noise_level: str, rng: random.Random, alloc: RegAllocator, hart: int) -> list[str]:
+def _prologue(noise_level: str, ctx: "GenCtx", hart: int) -> list[str]:
     # One noise instruction per hart prologue (L0 convention).
-    return NoisePool.prologue(noise_level, 1, rng, alloc, hart)
+    return NoisePool.prologue(noise_level, 1, ctx.rng, ctx.alloc, hart)
 
 
 # --------------------------------------------------------------------------- #
 # Family builders. Each returns a fully concrete MCProgram.
 # --------------------------------------------------------------------------- #
-def _build_sb(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
-    # P0: Store(x,1); Load(y -> d0)   P1: Store(y,1); Load(x -> d1)
-    alloc = RegAllocator()
+def _build_sb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # P0: Store(x,vx); Load(y -> d0)   P1: Store(y,vy); Load(x -> d1)
+    alloc = ctx.alloc
     alloc.addr("x")
     alloc.addr("y")
     addr_regs = alloc.addr_regs()
-    v = alloc.value()       # one value reg reused by both stores (x12)
-    d0 = alloc.dst(0)       # hart0 load destination (x10)
-    d1 = alloc.dst(1)       # hart1 load destination (x10)
+    vreg = alloc.value()       # one value reg reused by both stores
+    vx = ctx.store_value()
+    vy = ctx.store_value()
+    d0 = alloc.dst(0)
+    d1 = alloc.dst(1)
     p0 = HartProgram(
         hart_id=0,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 0),
-        modeled_window=[_store("x", 1, v), _load("y", d0)],
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_store("x", vx, vreg), _load("y", d0)],
         epilogue_noise=[],
         result_capture=[_obs(0, d0)],
     )
     p1 = HartProgram(
         hart_id=1,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 1),
-        modeled_window=[_store("y", 1, v), _load("x", d1)],
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_store("y", vy, vreg), _load("x", d1)],
         epilogue_noise=[],
         result_capture=[_obs(1, d1)],
     )
@@ -125,28 +175,30 @@ def _build_sb(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
     )
 
 
-def _build_lb(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
-    # P0: Load(x -> d0); Store(y,1)   P1: Load(y -> d1); Store(x,1)
-    alloc = RegAllocator()
+def _build_lb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # P0: Load(x -> d0); Store(y,vy)   P1: Load(y -> d1); Store(x,vx)
+    alloc = ctx.alloc
     alloc.addr("x")
     alloc.addr("y")
     addr_regs = alloc.addr_regs()
-    v = alloc.value()
+    vreg = alloc.value()
+    vx = ctx.store_value()
+    vy = ctx.store_value()
     d0 = alloc.dst(0)
     d1 = alloc.dst(1)
     p0 = HartProgram(
         hart_id=0,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 0),
-        modeled_window=[_load("x", d0), _store("y", 1, v)],
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_load("x", d0), _store("y", vy, vreg)],
         epilogue_noise=[],
         result_capture=[_obs(0, d0)],
     )
     p1 = HartProgram(
         hart_id=1,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 1),
-        modeled_window=[_load("y", d1), _store("x", 1, v)],
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_load("y", d1), _store("x", vx, vreg)],
         epilogue_noise=[],
         result_capture=[_obs(1, d1)],
     )
@@ -170,29 +222,31 @@ def _build_mp(fence_fn: Callable[[], ModeledEvent], family: str):
     MP and MP+fence.tso share their topology; only the fence event differs.
     """
 
-    def _build(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
-        # P0: Store(x,1); <fence>; Store(y,1)
+    def _build(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+        # P0: Store(x,vx); <fence>; Store(y,vy)
         # P1: Load(y -> dy); Load(x -> dx)
-        alloc = RegAllocator()
+        alloc = ctx.alloc
         alloc.addr("x")
         alloc.addr("y")
         addr_regs = alloc.addr_regs()
-        vx = alloc.value()  # x12
-        vy = alloc.value()  # x13
-        dy = alloc.dst(1)   # x10  (load y)
-        dx = alloc.dst(1)   # x11  (load x)
+        vx_reg = alloc.value()  # x12
+        vy_reg = alloc.value()  # x13
+        vx = ctx.store_value()
+        vy = ctx.store_value()
+        dy = alloc.dst(1)       # x10  (load y)
+        dx = alloc.dst(1)       # x11  (load x)
         p0 = HartProgram(
             hart_id=0,
             address_regs=dict(addr_regs),
-            prologue_noise=_prologue(noise_level, rng, alloc, 0),
-            modeled_window=[_store("x", 1, vx), fence_fn(), _store("y", 1, vy)],
+            prologue_noise=_prologue(noise_level, ctx, 0),
+            modeled_window=[_store("x", vx, vx_reg), fence_fn(), _store("y", vy, vy_reg)],
             epilogue_noise=[],
             result_capture=[],
         )
         p1 = HartProgram(
             hart_id=1,
             address_regs=dict(addr_regs),
-            prologue_noise=_prologue(noise_level, rng, alloc, 1),
+            prologue_noise=_prologue(noise_level, ctx, 1),
             modeled_window=[_load("y", dy), _load("x", dx)],
             epilogue_noise=[],
             result_capture=[_obs(1, dy), _obs(1, dx)],
@@ -213,27 +267,28 @@ def _build_mp(fence_fn: Callable[[], ModeledEvent], family: str):
     return _build
 
 
-def _build_corr(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
+def _build_corr(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
     # Coherence Read-Read: P0 writes x once; P1 reads x twice.
     # RVWMO coherence forbids P1 from seeing the new value then the old.
-    alloc = RegAllocator()
+    alloc = ctx.alloc
     alloc.addr("x")
     addr_regs = alloc.addr_regs()
-    v = alloc.value()       # x12
-    d0 = alloc.dst(1)       # x10
-    d1 = alloc.dst(1)       # x11
+    vreg = alloc.value()
+    vx = ctx.store_value()
+    d0 = alloc.dst(1)
+    d1 = alloc.dst(1)
     p0 = HartProgram(
         hart_id=0,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 0),
-        modeled_window=[_store("x", 1, v)],
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_store("x", vx, vreg)],
         epilogue_noise=[],
         result_capture=[],
     )
     p1 = HartProgram(
         hart_id=1,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 1),
+        prologue_noise=_prologue(noise_level, ctx, 1),
         modeled_window=[_load("x", d0), _load("x", d1)],
         epilogue_noise=[],
         result_capture=[_obs(1, d0), _obs(1, d1)],
@@ -252,41 +307,42 @@ def _build_corr(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram
     )
 
 
-def _build_wrc(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
+def _build_wrc(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
     # Write-Read-Causality (3 harts):
-    # P0: Store(x,1)
-    # P1: Load(x -> d0); Store(y,1)
+    # P0: Store(x,vx)
+    # P1: Load(x -> d0); Store(y,vy)
     # P2: Load(y -> d1); Load(x -> d2)
-    # Without a fence, the forbidden outcome is P1 sees x, P2 sees y, P2 sees !x.
-    alloc = RegAllocator()
+    alloc = ctx.alloc
     alloc.addr("x")
     alloc.addr("y")
     addr_regs = alloc.addr_regs()
-    vx = alloc.value()  # x12
-    vy = alloc.value()  # x13
-    d0 = alloc.dst(1)   # x10
-    d1 = alloc.dst(2)   # x10 (per-hart restart)
-    d2 = alloc.dst(2)   # x11
+    vx_reg = alloc.value()
+    vy_reg = alloc.value()
+    vx = ctx.store_value()
+    vy = ctx.store_value()
+    d0 = alloc.dst(1)
+    d1 = alloc.dst(2)
+    d2 = alloc.dst(2)
     p0 = HartProgram(
         hart_id=0,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 0),
-        modeled_window=[_store("x", 1, vx)],
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_store("x", vx, vx_reg)],
         epilogue_noise=[],
         result_capture=[],
     )
     p1 = HartProgram(
         hart_id=1,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 1),
-        modeled_window=[_load("x", d0), _store("y", 1, vy)],
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_load("x", d0), _store("y", vy, vy_reg)],
         epilogue_noise=[],
         result_capture=[_obs(1, d0)],
     )
     p2 = HartProgram(
         hart_id=2,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 2),
+        prologue_noise=_prologue(noise_level, ctx, 2),
         modeled_window=[_load("y", d1), _load("x", d2)],
         epilogue_noise=[],
         result_capture=[_obs(2, d1), _obs(2, d2)],
@@ -305,43 +361,43 @@ def _build_wrc(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
     )
 
 
-def _build_iriw(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram:
+def _build_iriw(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
     # Independent Reads of Independent Writes (4 harts):
-    # P0: Store(x,1)   P1: Store(y,1)
+    # P0: Store(x,vx)   P1: Store(y,vy)
     # P2: Load(y -> d0); Load(x -> d1)
     # P3: Load(x -> d2); Load(y -> d3)
-    # Tests whether two independent writers are observed in a consistent order
-    # by two independent readers.
-    alloc = RegAllocator()
+    alloc = ctx.alloc
     alloc.addr("x")
     alloc.addr("y")
     addr_regs = alloc.addr_regs()
-    vx = alloc.value()  # x12
-    vy = alloc.value()  # x13
-    d0 = alloc.dst(2)   # x10
-    d1 = alloc.dst(2)   # x11
-    d2 = alloc.dst(3)   # x10
-    d3 = alloc.dst(3)   # x11
+    vx_reg = alloc.value()
+    vy_reg = alloc.value()
+    vx = ctx.store_value()
+    vy = ctx.store_value()
+    d0 = alloc.dst(2)
+    d1 = alloc.dst(2)
+    d2 = alloc.dst(3)
+    d3 = alloc.dst(3)
     p0 = HartProgram(
         hart_id=0,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 0),
-        modeled_window=[_store("x", 1, vx)],
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_store("x", vx, vx_reg)],
         epilogue_noise=[],
         result_capture=[],
     )
     p1 = HartProgram(
         hart_id=1,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 1),
-        modeled_window=[_store("y", 1, vy)],
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_store("y", vy, vy_reg)],
         epilogue_noise=[],
         result_capture=[],
     )
     p2 = HartProgram(
         hart_id=2,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 2),
+        prologue_noise=_prologue(noise_level, ctx, 2),
         modeled_window=[_load("y", d0), _load("x", d1)],
         epilogue_noise=[],
         result_capture=[_obs(2, d0), _obs(2, d1)],
@@ -349,7 +405,7 @@ def _build_iriw(seed_id: int, noise_level: str, rng: random.Random) -> MCProgram
     p3 = HartProgram(
         hart_id=3,
         address_regs=dict(addr_regs),
-        prologue_noise=_prologue(noise_level, rng, alloc, 3),
+        prologue_noise=_prologue(noise_level, ctx, 3),
         modeled_window=[_load("x", d2), _load("y", d3)],
         epilogue_noise=[],
         result_capture=[_obs(3, d2), _obs(3, d3)],
@@ -378,7 +434,7 @@ class FamilySpec:
     name: str
     harts: int
     value_sensitive: bool
-    build: Callable[[int, str, random.Random], MCProgram]
+    build: Callable[[int, GenCtx, str], MCProgram]
 
 
 CATALOG: dict[str, FamilySpec] = {
@@ -420,6 +476,8 @@ def build_program(
     family: str,
     noise_level: str,
     rng: random.Random,
+    *,
+    randomize: bool = False,
 ) -> MCProgram:
     """Build a multicore test program for ``family``.
 
@@ -427,8 +485,11 @@ def build_program(
         seed_id: Stable seed identifier.
         family: One of :func:`available_families`.
         noise_level: One of the levels supported by :class:`NoisePool`.
-        rng: Seeded RNG (used for noise selection today; for register/noise
-            randomization in a later phase).
+        rng: Seeded RNG (drives noise selection now; register/value
+            randomization when ``randomize`` is set).
+        randomize: Enable the sound-by-construction variant axes (register
+            allocation, store values). Off by default to reproduce the
+            spike-verified seeds.
 
     Raises:
         ValueError: for unknown family or unsupported noise level.
@@ -444,4 +505,5 @@ def build_program(
             f"Unsupported noise level: {noise_level!r}. Supported: none, "
             f"{', '.join(NoisePool.supported_levels())}"
         )
-    return spec.build(seed_id, noise_level, rng)
+    ctx = GenCtx(rng, randomize)
+    return spec.build(seed_id, ctx, noise_level)

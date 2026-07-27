@@ -242,6 +242,7 @@ def _mc_to_gen_config(mc) -> MultiCoreGenerationConfig:
         litmus_runs=mc.litmus_runs,
         litmus_size=mc.litmus_size,
         build_executable=not mc.gen_only,
+        randomize=getattr(mc, "randomize", False),
     )
 
 

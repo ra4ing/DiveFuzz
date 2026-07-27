@@ -96,8 +96,31 @@ def _check_oracle(allowed: set, hist: Counter) -> None:
     assert rt3 == ResultType.NO_OUTCOME, f"expected NO_OUTCOME, got {rt3}"
 
 
+def _check_randomized() -> None:
+    # Randomized programs must still validate + export, and randomization must
+    # actually perturb output for at least one (family, seed) draw.
+    seen_diff = False
+    for family in available_families():
+        for seed in range(8):
+            det = build_program(seed, family, "none", random.Random(seed))
+            rnd = build_program(
+                seed, family, "none", random.Random(seed), randomize=True
+            )
+            validate(rnd)
+            det_lit = export_litmus(det)
+            rnd_lit = export_litmus(rnd)
+            for token in ("RISCV", "exists"):
+                assert token in rnd_lit, (
+                    f"{family}/{seed}: randomized litmus missing '{token}'"
+                )
+            if det_lit != rnd_lit:
+                seen_diff = True
+    assert seen_diff, "randomize=True never changed output across families/seeds"
+
+
 def main() -> None:
     _check_programs()
+    _check_randomized()
     hist = _check_histogram_parsing()
     allowed = _check_herd_parsing()
     _check_oracle(allowed, hist)

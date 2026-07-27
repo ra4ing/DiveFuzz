@@ -143,6 +143,7 @@ class MultiCoreConfig:
     litmus_harness_dir: str = "multi-core/spike-litmus-harness"
     litmus7_path: Optional[str] = None
     litmus7_share: Optional[str] = None
+    randomize: bool = False
 
     def __post_init__(self):
         self.seeds_output = os.path.expanduser(self.seeds_output)

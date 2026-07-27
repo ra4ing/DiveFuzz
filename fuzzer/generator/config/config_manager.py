@@ -112,6 +112,7 @@ class Config:
         raw_families = getattr(args, "test_family", None)
         self.test_families = list(raw_families) if raw_families else ["SB", "LB", "MP"]
         self.noise_level = str(getattr(args, "noise_level", "none"))
+        self.randomize = bool(getattr(args, "randomize", False))
         self.herd_path = str(getattr(args, "herd_path", "herd7"))
         self.litmus_harness_dir = str(getattr(args, "litmus_harness_dir", "fuzzer/multi-core/spike-litmus-harness"))
         self.litmus_runs = int(getattr(args, "litmus_runs", 20))
