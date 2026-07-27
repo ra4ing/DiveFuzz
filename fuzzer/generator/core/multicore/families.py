@@ -15,29 +15,28 @@
 
 Each family is a ``FamilySpec``: a named topology (hart count, value semantics)
 plus a builder that turns a seed id + generation context + noise level into a
-concrete ``MCProgram``. Builders are register- and value-agnostic -- they
-obtain every physical register from ``ctx.alloc`` and every store value from
-``ctx.store_value()``, so family topology stays decoupled from the randomization
-choices. That decoupling is the seam every randomization axis threads through.
+concrete ``MCProgram``. Builders are agnostic of every randomization choice --
+they obtain registers from ``ctx.alloc``, store values from ``ctx.store_value``,
+fence events from ``ctx.fence``, and aq/rl bits from ``ctx.aqrl``. Family
+topology stays decoupled from the randomization axes; that decoupling is the
+seam every axis threads through.
 
-Hart count is a property of the family, not a global knob: SB is defined as a
-2-hart topology, WRC as 3-hart, IRIW as 4-hart. Generating an N-hart test means
-selecting a family whose topology requires N harts.
+Hart count is a property of the family (SB=2, WRC=3, IRIW=4), not a global
+knob. Generating an N-hart test means selecting a family whose topology
+requires N harts.
 
-Randomization axes live in :class:`GenCtx`. Today two sound-by-construction
-axes are wired:
+Randomization axes live in :class:`GenCtx`. Sound-by-construction axes wired:
 
-- **register allocation** (axis 5): ``ctx.alloc = RegAllocator(rng)`` shuffles
-  the per-role pools. Sound because the memory model is invariant under
-  register renaming -- herd recomputes the allowed set on the renamed litmus
-  and the runner observes the same renamed keys.
-- **store values** (axis 4): ``ctx.store_value()`` returns a small nonzero
-  immediate. Sound because every catalog family is value-insensitive (the
-  interesting predicate is ordering/visibility, not the magnitude); herd
-  recomputes the allowed set on the new immediates.
+- **register allocation** (axis 5): ``ctx.alloc`` shuffles per-role pools.
+- **store values** (axis 4): ``ctx.store_value`` draws a small immediate.
+- **fence pred/succ** (axis 7a): ``ctx.fence`` draws pred/succ from {r,w}.
+- **aq/rl bits** (axis 7b): ``ctx.aqrl`` draws acquire/release bits per op.
+
+The last two are *semantic* axes -- they change the allowed-outcome set -- but
+herd recomputes it on the emitted litmus, so the comparison stays sound.
 
 Deterministic mode (``randomize=False``, the default) reproduces the
-spike-verified seeds byte-for-byte.
+spike-verified seeds byte-for-byte (fence rw,rw, no aq/rl, value 1).
 
 All families use only Load/Store/Fence/FenceTso events. AMO/LR/SC/Dependency/
 Delay families are deferred (they need exporter + validator extensions).
@@ -61,14 +60,17 @@ _ISA = "rv64gc"
 _VALUE_MIN = 1
 _VALUE_MAX = 127
 
+# Fence pred/succ subsets restricted to data-memory bits {r,w}; the i/o bits
+# are for device memory and irrelevant to coherence testing.
+_FENCE_BIT_CHOICES = ("r", "w", "rw")
+
 
 class GenCtx:
     """Per-seed generation context: the single seam for every randomization axis.
 
     Family builders never read a toggle directly -- they ask the context for a
-    register allocator (``ctx.alloc``), a store value (``ctx.store_value()``),
-    and the rng (``ctx.rng``). Enabling or adding an axis changes only this
-    class, never the builders.
+    register allocator, a store value, and a fence event. Enabling
+    or adding an axis changes only this class, never the builders.
     """
 
     def __init__(self, rng: random.Random, randomize: bool):
@@ -80,38 +82,41 @@ class GenCtx:
         self.alloc = RegAllocator(rng if randomize else None)
 
     def store_value(self) -> int:
-        """A value to store into a shared variable.
-
-        Deterministic default is 1 (preserves the spike-verified seeds). When
-        randomizing, an independent draw from ``[_VALUE_MIN, _VALUE_MAX]``;
-        every catalog family is value-insensitive, so this never changes the
-        *topology* of the allowed-outcome set, only the concrete immediates.
-        """
+        """A value to store. Default 1; when randomizing, a draw in
+        ``[_VALUE_MIN, _VALUE_MAX]``. Every catalog family is value-insensitive."""
         if self.randomize:
             return self.rng.randint(_VALUE_MIN, _VALUE_MAX)
         return 1
+
+    def fence(self) -> ModeledEvent:
+        """A full fence. Default ``rw,rw``; when randomizing, pred/succ drawn
+        independently from {r, w, rw}. Sound: the allowed set changes, herd
+        recomputes it."""
+        if self.randomize:
+            pred = self.rng.choice(_FENCE_BIT_CHOICES)
+            succ = self.rng.choice(_FENCE_BIT_CHOICES)
+            return ModeledEvent(kind=EventKind.FENCE, pred=pred, succ=succ)
+        return ModeledEvent(kind=EventKind.FENCE, pred="rw", succ="rw")
 
 
 # --------------------------------------------------------------------------- #
 # Event constructors (register-agnostic; store the symbolic var name, the
 # exporter resolves it through the hart's address_regs at render time).
 # --------------------------------------------------------------------------- #
-def _store(addr: str, value: int, value_reg: str) -> ModeledEvent:
+def _store(addr: str, value: int, value_reg: str, aq: bool = False, rl: bool = False) -> ModeledEvent:
     return ModeledEvent(
         kind=EventKind.STORE,
         addr=addr,
         value=value,
         value_reg=value_reg,
         width=_WIDTH,
+        aq=aq,
+        rl=rl,
     )
 
 
-def _load(addr: str, dst: str) -> ModeledEvent:
-    return ModeledEvent(kind=EventKind.LOAD, addr=addr, dst=dst, width=_WIDTH)
-
-
-def _fence(pred: str = "rw", succ: str = "rw") -> ModeledEvent:
-    return ModeledEvent(kind=EventKind.FENCE, pred=pred, succ=succ)
+def _load(addr: str, dst: str, aq: bool = False, rl: bool = False) -> ModeledEvent:
+    return ModeledEvent(kind=EventKind.LOAD, addr=addr, dst=dst, width=_WIDTH, aq=aq, rl=rl)
 
 
 def _fence_tso() -> ModeledEvent:
@@ -133,6 +138,10 @@ def _prologue(noise_level: str, ctx: "GenCtx", hart: int) -> list[str]:
 
 # --------------------------------------------------------------------------- #
 # Family builders. Each returns a fully concrete MCProgram.
+#
+# ``_load`` calls pass ``*ctx.aqrl(False)`` (load-acquire semantics) and
+# ``_store`` calls pass ``*ctx.aqrl(True)`` (store-release semantics); the
+# kind flag keeps every draw in herd7's accepted subspace.
 # --------------------------------------------------------------------------- #
 def _build_sb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
     # P0: Store(x,vx); Load(y -> d0)   P1: Store(y,vy); Load(x -> d1)
@@ -149,7 +158,10 @@ def _build_sb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=0,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 0),
-        modeled_window=[_store("x", vx, vreg), _load("y", d0)],
+        modeled_window=[
+            _store("x", vx, vreg),
+            _load("y", d0),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(0, d0)],
     )
@@ -157,7 +169,10 @@ def _build_sb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=1,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 1),
-        modeled_window=[_store("y", vy, vreg), _load("x", d1)],
+        modeled_window=[
+            _store("y", vy, vreg),
+            _load("x", d1),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(1, d1)],
     )
@@ -190,7 +205,10 @@ def _build_lb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=0,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 0),
-        modeled_window=[_load("x", d0), _store("y", vy, vreg)],
+        modeled_window=[
+            _load("x", d0),
+            _store("y", vy, vreg),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(0, d0)],
     )
@@ -198,7 +216,10 @@ def _build_lb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=1,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 1),
-        modeled_window=[_load("y", d1), _store("x", vx, vreg)],
+        modeled_window=[
+            _load("y", d1),
+            _store("x", vx, vreg),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(1, d1)],
     )
@@ -216,14 +237,15 @@ def _build_lb(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
     )
 
 
-def _build_mp(fence_fn: Callable[[], ModeledEvent], family: str):
-    """Return an MP builder using ``fence_fn`` as the inter-store barrier.
+def _build_mp(fence_kind: str, family: str):
+    """Return an MP builder whose inter-store barrier is ``fence_kind``.
 
-    MP and MP+fence.tso share their topology; only the fence event differs.
+    ``"fence"`` -> a (possibly randomized) full fence via ``ctx.fence()``;
+    ``"fence_tso"`` -> a fixed ``fence.tso`` (the MPTSO variant).
     """
 
     def _build(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
-        # P0: Store(x,vx); <fence>; Store(y,vy)
+        # P0: Store(x,vx); <barrier>; Store(y,vy)
         # P1: Load(y -> dy); Load(x -> dx)
         alloc = ctx.alloc
         alloc.addr("x")
@@ -235,11 +257,16 @@ def _build_mp(fence_fn: Callable[[], ModeledEvent], family: str):
         vy = ctx.store_value()
         dy = alloc.dst(1)       # x10  (load y)
         dx = alloc.dst(1)       # x11  (load x)
+        barrier = _fence_tso() if fence_kind == "fence_tso" else ctx.fence()
         p0 = HartProgram(
             hart_id=0,
             address_regs=dict(addr_regs),
             prologue_noise=_prologue(noise_level, ctx, 0),
-            modeled_window=[_store("x", vx, vx_reg), fence_fn(), _store("y", vy, vy_reg)],
+            modeled_window=[
+                _store("x", vx, vx_reg),
+                barrier,
+                _store("y", vy, vy_reg),
+            ],
             epilogue_noise=[],
             result_capture=[],
         )
@@ -247,7 +274,10 @@ def _build_mp(fence_fn: Callable[[], ModeledEvent], family: str):
             hart_id=1,
             address_regs=dict(addr_regs),
             prologue_noise=_prologue(noise_level, ctx, 1),
-            modeled_window=[_load("y", dy), _load("x", dx)],
+            modeled_window=[
+                _load("y", dy),
+                _load("x", dx),
+            ],
             epilogue_noise=[],
             result_capture=[_obs(1, dy), _obs(1, dx)],
         )
@@ -289,7 +319,10 @@ def _build_corr(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=1,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 1),
-        modeled_window=[_load("x", d0), _load("x", d1)],
+        modeled_window=[
+            _load("x", d0),
+            _load("x", d1),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(1, d0), _obs(1, d1)],
     )
@@ -335,7 +368,10 @@ def _build_wrc(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=1,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 1),
-        modeled_window=[_load("x", d0), _store("y", vy, vy_reg)],
+        modeled_window=[
+            _load("x", d0),
+            _store("y", vy, vy_reg),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(1, d0)],
     )
@@ -343,7 +379,10 @@ def _build_wrc(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=2,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 2),
-        modeled_window=[_load("y", d1), _load("x", d2)],
+        modeled_window=[
+            _load("y", d1),
+            _load("x", d2),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(2, d1), _obs(2, d2)],
     )
@@ -398,7 +437,10 @@ def _build_iriw(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=2,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 2),
-        modeled_window=[_load("y", d0), _load("x", d1)],
+        modeled_window=[
+            _load("y", d0),
+            _load("x", d1),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(2, d0), _obs(2, d1)],
     )
@@ -406,7 +448,10 @@ def _build_iriw(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         hart_id=3,
         address_regs=dict(addr_regs),
         prologue_noise=_prologue(noise_level, ctx, 3),
-        modeled_window=[_load("x", d2), _load("y", d3)],
+        modeled_window=[
+            _load("x", d2),
+            _load("y", d3),
+        ],
         epilogue_noise=[],
         result_capture=[_obs(3, d2), _obs(3, d3)],
     )
@@ -440,9 +485,9 @@ class FamilySpec:
 CATALOG: dict[str, FamilySpec] = {
     "SB": FamilySpec("SB", harts=2, value_sensitive=False, build=_build_sb),
     "LB": FamilySpec("LB", harts=2, value_sensitive=False, build=_build_lb),
-    "MP": FamilySpec("MP", harts=2, value_sensitive=False, build=_build_mp(_fence, "MP")),
+    "MP": FamilySpec("MP", harts=2, value_sensitive=False, build=_build_mp("fence", "MP")),
     "MPTSO": FamilySpec(
-        "MPTSO", harts=2, value_sensitive=False, build=_build_mp(_fence_tso, "MPTSO")
+        "MPTSO", harts=2, value_sensitive=False, build=_build_mp("fence_tso", "MPTSO")
     ),
     "CoRR": FamilySpec("CoRR", harts=2, value_sensitive=False, build=_build_corr),
     "WRC": FamilySpec("WRC", harts=3, value_sensitive=False, build=_build_wrc),
@@ -485,11 +530,11 @@ def build_program(
         seed_id: Stable seed identifier.
         family: One of :func:`available_families`.
         noise_level: One of the levels supported by :class:`NoisePool`.
-        rng: Seeded RNG (drives noise selection now; register/value
+        rng: Seeded RNG (drives noise selection now; register/value/fence/aqrl
             randomization when ``randomize`` is set).
-        randomize: Enable the sound-by-construction variant axes (register
-            allocation, store values). Off by default to reproduce the
-            spike-verified seeds.
+        randomize: Enable the sound-by-construction axes (register allocation,
+            store values, fence pred/succ, aq/rl bits). Off by default to
+            reproduce the spike-verified seeds.
 
     Raises:
         ValueError: for unknown family or unsupported noise level.

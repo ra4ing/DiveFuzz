@@ -118,9 +118,26 @@ def _check_randomized() -> None:
     assert seen_diff, "randomize=True never changed output across families/seeds"
 
 
+def _check_ordering_randomization() -> None:
+    # Deterministic MP keeps the canonical fence.
+    det_mp = export_litmus(build_program(0, "MP", "none", random.Random(0)))
+    assert "fence rw,rw" in det_mp, "deterministic MP lost canonical fence rw,rw"
+    # Randomized mode must, across draws, vary the fence pred/succ bits.
+    seen_varied_fence = False
+    for seed in range(40):
+        lit = export_litmus(
+            build_program(0, "MP", "none", random.Random(seed), randomize=True)
+        )
+        for line in lit.splitlines():
+            if "fence " in line and "fence.tso" not in line and "fence rw,rw" not in line:
+                seen_varied_fence = True
+    assert seen_varied_fence, "randomize=True never varied fence bits across 40 MP seeds"
+
+
 def main() -> None:
     _check_programs()
     _check_randomized()
+    _check_ordering_randomization()
     hist = _check_histogram_parsing()
     allowed = _check_herd_parsing()
     _check_oracle(allowed, hist)

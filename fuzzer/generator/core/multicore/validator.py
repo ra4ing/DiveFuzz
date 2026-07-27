@@ -35,6 +35,9 @@ _UNSUPPORTED_KINDS = {
 # Kinds whose ``dst`` register defines an observed value.
 _OBSERVING_KINDS = {EventKind.LOAD, EventKind.AMO, EventKind.LR, EventKind.SC}
 
+# Valid letters in a fence pred/succ field (RISC-V iorw bits).
+_FENCE_BITS = frozenset("iorw")
+
 
 def validate(program: MCProgram) -> None:
     """Raise ``ValueError`` if ``program`` is not a sound seed."""
@@ -81,6 +84,16 @@ def validate(program: MCProgram) -> None:
             if ev.kind is EventKind.LOAD and ev.dst is None:
                 raise ValueError(
                     f"LOAD on hart {hp.hart_id} has no destination register"
+                )
+            if ev.kind is EventKind.FENCE and (
+                not ev.pred
+                or not ev.succ
+                or not set(ev.pred) <= _FENCE_BITS
+                or not set(ev.succ) <= _FENCE_BITS
+            ):
+                raise ValueError(
+                    f"fence on hart {hp.hart_id} has invalid pred/succ "
+                    f"'{ev.pred}','{ev.succ}' (must be non-empty subsets of iorw)"
                 )
 
         for noise in list(hp.prologue_noise) + list(hp.epilogue_noise):
