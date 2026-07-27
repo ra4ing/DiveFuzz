@@ -75,9 +75,15 @@ hart 数是族的固有属性（SB 定义为 2-hart、WRC 为 3-hart、IRIW 为 
 
 族选择为确定性轮换：`family = test_families[(seed_id - seed_offset) % len(test_families)]`，保证覆盖度可复现。`available_families()` 返回全集；`family_hart_count(f)` 返回族的 hart 数。
 
-### 2.4 L0 噪声
+### 2.4 噪声（L0 / L1）
 
-`noise_level="L0"` 在每个 hart 的 modeled window 之前插入 `nop` / `addi x20,x20,0`（由 seeded RNG 选择），并**写入 `.litmus` 表格**（作为各 process 列的前导行）。这两条指令不触碰共享内存或观测寄存器，故不影响 herd 的允许结果集（已实测：SB+L0 的 `States` 与无噪声一致）。`noise_level="none"` 不插入噪声。其他值在 `build_program` 立即 `ValueError`。
+噪声只写 scratch 寄存器 `x20`，与 modeled window 用到的所有寄存器（addr x6/x7、value x12/x13、observed x10/x11）以及 harness/ABI 保留集都不相交，故对 window 的访存与 observed 结果零影响——无论插在 prologue、窗口事件之间（interleaving）还是 epilogue 都安全。herd 只对 modeled window 求解，噪声行不在其内。validator 用 `NoisePool.is_safe` 逐行校验（助记符白名单 + 所有寄存器操作数 ∈ SCRATCH）。
+
+- `none`：无噪声。
+- `L0`：惰性指令 `nop` / `addi x20,x20,0`，prologue 插 1 条。
+- `L1`：x20 上的整数 ALU（`addi`/`slli`/`srli` 带随机立即数，`add`/`sub`/`and`/`or`/`xor`/`sll`/`srl` x20,x20,x20），prologue 插 2 条 **+ 窗口每条事件后插 1 条 interleaving 噪声**。interleaving 把 load/store 在时间上拉开，是压流水线时序的核心。无内存访问、无分支、不会 trap。
+
+> 探针发现 herd7 的 RISC-V litmus 模型不含 M 扩展（`mul` 被拒），故 L1 不含 `mul`。
 
 ### 2.5 litmus 导出格式
 
@@ -222,9 +228,11 @@ MP 的结果尤其有意义：spike 从未观测到 `y 已可见但 x 尚不可�
 
 ## 7. 当前限制
 
-- **族**：SB/LB/MP/MPTSO/CoRR/WRC/IRIW（均仅用 Load/Store/Fence/FenceTso，exporter+validator 完整支持）。`hart_count` ∈ {2,3,4}（各族拓扑固有）。`noise_level ∈ {none, L0}`。未知族/级别在 `build_program` 立即 `ValueError`；`--hart-count` 与族拓扑冲突时报错。
-- **AMO / LR / SC / Dependency / Delay** 事件已在模型中声明，但在 validator/exporter 中显式拒绝（`... not yet implemented in the exporter (planned for the randomization phase)`）。这是后续随机化阶段的独立工作流。
-- **值/寄存器/噪声/地址别名等随机化维度尚未开启**：当前 `RegAllocator`/`NoisePool` 走确定性默认（复现已验证 seed），rng 仅用于 L0 噪声二选一。随机化是下一阶段。
+- **族**：SB/LB/MP/MPTSO/CoRR/WRC/IRIW（均仅用 Load/Store/Fence/FenceTso，exporter+validator 完整支持）。`hart_count` ∈ {2,3,4}（各族拓扑固有）。`noise_level ∈ {none, L0, L1}`。未知族/级别在 `build_program` 立即 `ValueError`；`--hart-count` 与族拓扑冲突时报错。
+- **随机化已开启 6 轴**（`--randomize`）：寄存器分配、存值、fence pred/succ、同字别名、访问宽度混用，外加 L1 噪声（`--noise-level L1`，含指令间 interleaving）。全部 spike 端到端验证、可组合。确定性模式（`--randomize` 关）与已验证 seed 字节一致。所有轴集中在 `GenCtx`，新增轴只改 `GenCtx` 不碰族定义。
+- **AMO / LR / SC / Dependency / Delay** 事件已在模型中声明，但在 validator/exporter 中显式拒绝（`... not yet implemented in the exporter (planned for the randomization phase)`）。后续独立工作流。
+- **aq/rl 位受阻**：plain load/store 编码无 aq/rl 位（真实汇编器拒 `ld.aq`），herd7 虽接受但不编译。aq/rl 只存在于原子指令，需等 AMO/LR-SC 落地；plain 访问的 acquire/release 可用 fence 插入表达（未来轴）。
+- **地址布局受限**：litmus7 不支持数组声明/指针偏移，故 only same-word 别名可表达；same-cacheline-different-word / 跨页 需改 harness 内存布局（独立大工程）。
 - XiangShan / chipyard 端到端 smoke 尚未在仓库内验证（DUT 运行在服务器）。
 
 ---
