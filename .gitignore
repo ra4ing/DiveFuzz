@@ -14,4 +14,12 @@ fuzzer/build
 .vscode
 fuzzer/*.yaml
 outputs
+# Windows Zone.Identifier ADS clutter
+*:Zone.Identifier
+# Build output dirs and binary/log artifacts (any depth)
+build/
+*.elf
+*.bin
+*.img
+*.log
 .txt
