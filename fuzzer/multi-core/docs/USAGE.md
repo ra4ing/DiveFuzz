@@ -30,7 +30,7 @@ python -m generator.main --generate --multicore --seeds 3 \
 
 注意 hart 的语义：`--hart-count N` 是**过滤器**，只生成拓扑要求 N hart 的族；省略则各族用自己的 hart 数（SB/LB/MP/MPTSO/CoRR 是 2，WRC 是 3，IRIW 是 4）。所以跑 IRIW 不需要传 `--hart-count 4`，只要 `--test-family IRIW` 或不传 `--hart-count` 即可；若传了 `--hart-count 2` 又点名 IRIW，会立刻报清晰错误而非静默生成错误的程序。
 
-可选族覆盖 plain 访问（SB/LB/MP/MPTSO/CoRR/WRC/IRIW）与原子（AMO 压原子性、LRSC 压预留冲突）。原子族用 AMO/LR/SC 事件，是 `--test-family` 的一等公民；它们额外受两条随机化轴作用（见下）。
+可选族覆盖 plain 访问（SB/LB/MP/MPTSO/CoRR/CoWR/CoRW/CoWW/WRC/IRIW/2+2W）与原子（AMO 压原子性、LRSC 压预留冲突）。相干/序族（CoWR/CoRW/CoWW/2+2W）值敏感，builder 自动取互异竞争值；其余值不敏感。原子族用 AMO/LR/SC 事件，是 `--test-family` 的一等公民；它们额外受两条随机化轴作用（见下）。
 
 ## 随机化：`--randomize` 与 `--noise-level`
 

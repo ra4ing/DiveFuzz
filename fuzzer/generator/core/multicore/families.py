@@ -22,7 +22,7 @@ operation from ``ctx.amo_op`` and acquire/release bits from ``ctx.aqrl``. Family
 topology stays decoupled from the randomization axes; that decoupling is the
 seam every axis threads through.
 
-Hart count is a property of the family (SB/AMO/LRSC=2, WRC=3, IRIW=4), not a
+Hart count is a property of the family (SB/LB/MP/MPTSO/CoRR/CoWR/CoRW/CoWW/AMO/LRSC=2, WRC/2+2W=3, IRIW=4), not a
 global knob. Generating an N-hart test means selecting a family whose topology
 requires N harts.
 
@@ -48,9 +48,11 @@ spike-verified seeds byte-for-byte for the original families (fence rw,rw, no
 aq/rl, value 1); the atomic families default to ``amoadd.w`` and ``lr.w``/``sc.w``
 with no aq/rl.
 
-Families now span Load/Store/Fence/FenceTso (SB, LB, MP, MPTSO, CoRR, WRC, IRIW)
-and AMO/LR/SC (AMO atomicity, LR/SC reservation conflict). Dependency/Delay
-events remain deferred.
+Families span plain Load/Store/Fence/FenceTso (SB, LB, MP, MPTSO, CoRR, WRC,
+IRIW, CoWR, CoRW, CoWW, 2+2W) and AMO/LR/SC (AMO atomicity, LR/SC reservation
+conflict). The coherence/store-store families (CoWR/CoRW/CoWW/2+2W) are
+value-sensitive -- they use :func:`_distinct_values` so competing writes differ;
+the rest are value-insensitive. Dependency/Delay events remain deferred.
 """
 
 import random
@@ -657,6 +659,187 @@ def _build_lrsc(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         metadata={"family": "LRSC"},
     )
 
+def _distinct_values(ctx: "GenCtx", n: int) -> list[int]:
+    """``n`` distinct store values in [_VALUE_MIN, _VALUE_MAX]. Coherence and
+    store-store families are value-sensitive: they need distinct competing
+    values to have a non-trivial allowed set (equal values collapse to one
+    outcome). All values stay <= _VALUE_MAX so width-mixing (down to sb/lb)
+    never truncates them."""
+    base = ctx.store_value()
+    return [(base + i - 1) % _VALUE_MAX + 1 for i in range(n)]
+
+
+def _build_cowr(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # Coherence Write-Read (2 harts): P0 writes x then reads it back; P1 writes
+    # a distinct competing value. CoWR forbids P0 from reading the stale initial
+    # value after its own store -- it must see its own value or P1's.
+    alloc = ctx.alloc
+    alloc.addr("x")
+    addr_regs = alloc.addr_regs()
+    vreg = alloc.value()
+    v0, v1 = _distinct_values(ctx, 2)
+    d0 = alloc.dst(0)
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_store("x", v0, vreg), _load("x", d0)],
+        epilogue_noise=[],
+        result_capture=[_obs(0, d0)],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_store("x", v1, vreg)],
+        epilogue_noise=[],
+        result_capture=[],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"CoWR-mc{seed_id}",
+        isa=_ISA,
+        hart_count=2,
+        shared_vars=_shared_vars("x"),
+        hart_programs=[p0, p1],
+        observed=[_obs(0, d0)],
+        oracle_spec={"family": "CoWR", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "CoWR"},
+    )
+
+
+def _build_corw(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # Coherence Read-Write (2 harts): P0 reads x, writes its own value, reads x
+    # again; P1 writes a distinct competing value. The two observed reads probe
+    # whether P0's own write and P1's write stay coherence-consistent.
+    alloc = ctx.alloc
+    alloc.addr("x")
+    addr_regs = alloc.addr_regs()
+    vreg = alloc.value()
+    v0, v1 = _distinct_values(ctx, 2)
+    d0 = alloc.dst(0)
+    d1 = alloc.dst(0)
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_load("x", d0), _store("x", v0, vreg), _load("x", d1)],
+        epilogue_noise=[],
+        result_capture=[_obs(0, d0), _obs(0, d1)],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_store("x", v1, vreg)],
+        epilogue_noise=[],
+        result_capture=[],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"CoRW-mc{seed_id}",
+        isa=_ISA,
+        hart_count=2,
+        shared_vars=_shared_vars("x"),
+        hart_programs=[p0, p1],
+        observed=[_obs(0, d0), _obs(0, d1)],
+        oracle_spec={"family": "CoRW", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "CoRW"},
+    )
+
+
+def _build_coww(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # Coherence Write-Write (2 harts): P0 writes two distinct values to x in
+    # program order; P1 reads x. P1 may observe the initial value, P0's first
+    # value, or P0's second value -- but never an out-of-coherence-order value.
+    alloc = ctx.alloc
+    alloc.addr("x")
+    addr_regs = alloc.addr_regs()
+    vreg = alloc.value()
+    v0, v1 = _distinct_values(ctx, 2)
+    d0 = alloc.dst(1)
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_store("x", v0, vreg), _store("x", v1, vreg)],
+        epilogue_noise=[],
+        result_capture=[],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_load("x", d0)],
+        epilogue_noise=[],
+        result_capture=[_obs(1, d0)],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"CoWW-mc{seed_id}",
+        isa=_ISA,
+        hart_count=2,
+        shared_vars=_shared_vars("x"),
+        hart_programs=[p0, p1],
+        observed=[_obs(1, d0)],
+        oracle_spec={"family": "CoWW", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "CoWW"},
+    )
+
+
+def _build_2plus2w(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # Store-store ordering across two locations (3 harts): P0 writes y then x,
+    # P1 writes x then y (no fence), and P2 reads both. Without a fence the
+    # writers' store-store order is unconstrained, so P2 can see mixed outcomes
+    # (x from P0, y from P1) that a fence would forbid -- a 9-state outcome set.
+    alloc = ctx.alloc
+    alloc.addr("x")
+    alloc.addr("y")
+    addr_regs = alloc.addr_regs()
+    vreg = alloc.value()
+    v_y0, v_x0, v_x1, v_y1 = _distinct_values(ctx, 4)
+    d0 = alloc.dst(2)
+    d1 = alloc.dst(2)
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_store("y", v_y0, vreg), _store("x", v_x0, vreg)],
+        epilogue_noise=[],
+        result_capture=[],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_store("x", v_x1, vreg), _store("y", v_y1, vreg)],
+        epilogue_noise=[],
+        result_capture=[],
+    )
+    p2 = HartProgram(
+        hart_id=2,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 2),
+        modeled_window=[_load("x", d0), _load("y", d1)],
+        epilogue_noise=[],
+        result_capture=[_obs(2, d0), _obs(2, d1)],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"2+2W-mc{seed_id}",
+        isa=_ISA,
+        hart_count=3,
+        shared_vars=_shared_vars("x", "y"),
+        hart_programs=[p0, p1, p2],
+        observed=[_obs(2, d0), _obs(2, d1)],
+        oracle_spec={"family": "2+2W", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "2+2W"},
+    )
+
 # --------------------------------------------------------------------------- #
 # Catalog
 # --------------------------------------------------------------------------- #
@@ -682,6 +865,10 @@ CATALOG: dict[str, FamilySpec] = {
     "IRIW": FamilySpec("IRIW", harts=4, value_sensitive=False, build=_build_iriw),
     "AMO": FamilySpec("AMO", harts=2, value_sensitive=False, build=_build_amo),
     "LRSC": FamilySpec("LRSC", harts=2, value_sensitive=False, build=_build_lrsc),
+    "CoWR": FamilySpec("CoWR", harts=2, value_sensitive=True, build=_build_cowr),
+    "CoRW": FamilySpec("CoRW", harts=2, value_sensitive=True, build=_build_corw),
+    "CoWW": FamilySpec("CoWW", harts=2, value_sensitive=True, build=_build_coww),
+    "2+2W": FamilySpec("2+2W", harts=3, value_sensitive=True, build=_build_2plus2w),
 }
 
 

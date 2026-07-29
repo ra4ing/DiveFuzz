@@ -22,7 +22,7 @@ DiveFuzz-MC 的核心 trick 是**对形式化内存模型做差分**：生成一
 
 ## 族：固定拓扑，而非参数化模板
 
-当前 catalog 有九个族，每个是一条**固定的多 hart 拓扑**：
+当前 catalog 有十三个族，每个是一条**固定的多 hart 拓扑**：
 
 | 族 | hart | 拓扑要点 | 主要压测目标 |
 |---|---|---|---|
@@ -34,6 +34,10 @@ DiveFuzz-MC 的核心 trick 是**对形式化内存模型做差分**：生成一
 | IRIW | 4 | 两个写者 + 两个独立读者 | 独立写的可见序一致性 |
 | AMO | 2 | 两个核各做一次原子 read-modify-write，观测返回的旧值 | AMO 原子性（禁止两核都读到初值） |
 | LRSC | 2 | P0 做 LR+SC 同址，P1 并发 store 同址 | LR/SC 预留冲突（介入 store 须令 SC 失败） |
+| CoWR | 2 | P0 写后读同址，P1 并发写不同值 | 同址 coherence（禁止写后读到旧值） |
+| CoRW | 2 | P0 读、写、再读同址，P1 并发写 | 同址 coherence（读-写一致性，3 态） |
+| CoWW | 2 | P0 连写两个不同值同址，P1 读 | 同址 coherence（读者可观测中间写入值） |
+| 2+2W | 3 | P0 写 y→x、P1 写 x→y（无 fence），P2 读两址 | 跨址 store-store 重排可见性（9 态） |
 
 hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-hart 拓扑，IRIW 定义上就是 4-hart——"5 hart 的 SB"是另一个测试。因此 `--hart-count N` 是一个**过滤器**：只挑选拓扑要求 N hart 的族，而不是把 N 强加到所有族上。族选择本身是确定性轮换 `test_families[(seed_id - offset) % len]`，保证覆盖可复现。
 
@@ -47,7 +51,7 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 
 **寄存器分配**。`RegAllocator` 按角色（地址/值/观测/scratch）从互不相交的寄存器池里分配。重命名对内存模型是一个双射——herd 在重命名后的 litmus 上重算 allowed 集，runner 观测同样的重命名键。因此这是构造上安全的，且扰动 renamer/ROB/物理寄存器压力。
 
-**存值**。存一个 `[1,127]` 的小立即数。所有 catalog 族都是 value-insensitive 的（语义谓词关心的是可见性/顺序，不是数值大小），所以换值不改变 allowed 集的拓扑。这个上界同时满足 `ori` 的 12 位立即数范围和任何访问宽度。
+**存值**。存一个 `[1,127]` 的小立即数。多数 catalog 族是 value-insensitive 的（语义谓词关心可见性/顺序而非数值大小），换值不改 allowed 集拓扑；但相干/序族（CoWR/CoRW/CoWW/2+2W）值敏感——竞争写必须取不同值才有非平凡 allowed 集（同值会塌缩成单态），故其 builder 用 `_distinct_values` 取互异值。这个上界同时满足 `ori` 的 12 位立即数范围和任何访问宽度。
 
 **fence pred/succ**。屏障的前驱/后继位从 `{r,w,rw}` 独立抽取。这是一条**语义轴**——它确实改变了 allowed 集（比如 `fence r,r` 不强制 store-store 序，被禁止的结果就会变成允许）。但因为 herd 在新 litmus 上重算，比对仍然成立。
 
@@ -101,7 +105,7 @@ spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF
 | 轴 | 生成（GenCtx / 应用点） | 渲染（exporter） | 校验（validator） |
 |---|---|---|---|
 | 寄存器分配 | `regalloc.RegAllocator`，builder 经 `ctx.alloc` 取 | 隐式：addr_regs 进 init 绑定、作指令操作数 | 无显式（靠池互斥 + 与 RESERVED 不相交保证） |
-| 存值 | `GenCtx.store_value`，builder 调用 | STORE 分支 `ori reg,x0,V` | 无（族 value-insensitive） |
+| 存值 | `GenCtx.store_value`，builder 调用 | STORE 分支 `ori reg,x0,V` | 无（builder 取值；相干族经 `_distinct_values` 保证竞争写互异） |
 | fence pred/succ | `GenCtx.fence`，MP builder 用 | FENCE 分支 `fence pred,succ` | fence 位须是 iorw 非空子集 |
 | 同字别名 | `GenCtx.alias_map`，`build_program` post-build 设 `program.alias_map` | init 去重物理变量 + 寄存器绑物理名 | 别名目标∈shared、同组 width/init 一致 |
 | 宽度混用 | `GenCtx.access_width`，`build_program` post-build `replace(ev,width=)` | 宽度表 `_mem_op`/`_load_op` | width∈{1,2,4,8} 且 ≤ 变量 width |

@@ -2,7 +2,7 @@
 
 DiveFuzz-MC 是 DiveFuzz 的多核扩展，用**对形式化内存模型差分**的方式 fuzz RISC-V 多核处理器：生成多 hart 内存序测试，用 herd7 求解 RVWMO 允许的结果集，在 DUT 上重复运行，凡出现允许集之外的观测即为候选 bug。后端是 litmus7，oracle 是 herd7。
 
-当前状态：9 个测试族（SB/LB/MP/MPTSO/CoRR/WRC/IRIW + AMO/LRSC，hart 2/3/4），8 条可组合的随机化轴（`--randomize` 开寄存器/存值/fence 位/同字别名/宽度混用/AMO 操作/aq·rl 位，`--noise-level L1` 加指令间 interleaving 噪声），全部以 spike 端到端验证通过、可组合；确定性模式与基准 seed 字节一致（新原子族默认 amoadd.w 与 lr·sc.w）。
+当前状态：13 个测试族（SB/LB/MP/MPTSO/CoRR/CoWR/CoRW/CoWW/WRC/IRIW + AMO/LRSC + 2+2W，hart 2/3/4），8 条可组合的随机化轴（`--randomize` 开寄存器/存值/fence 位/同字别名/宽度混用/AMO 操作/aq·rl 位，`--noise-level L1` 加指令间 interleaving 噪声），全部以 spike 端到端验证通过、可组合；确定性模式与基准 seed 字节一致（相干/序族用 `_distinct_values` 取互异值、原子族默认 amoadd.w 与 lr·sc.w）。
 
 ## 去哪读什么
 
