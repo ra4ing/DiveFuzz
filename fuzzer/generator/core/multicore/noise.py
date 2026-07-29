@@ -33,7 +33,7 @@ Levels (research plan §5)
 - ``none`` : no noise.
 - ``L0``   : inert instructions (``nop``, ``addi x20,x20,0``).
 - ``L1``   : scratch-only integer ALU ops on x20 (``addi``/``slli``/``srli``
-  with random immediates, plus ``add``/``sub``/``and``/``or``/``xor``/``mul``
+  with random immediates, plus ``add``/``sub``/``and``/``or``/``xor``
   ``x20,x20,x20``). These perturb the ALU/rename pipeline and (when
   interleaved between window events) separate the loads/stores in time,
   exposing reordering-sensitive timing. No memory accesses, no branches, no
