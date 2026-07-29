@@ -74,3 +74,35 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 整条 Python 流水线是 DUT 无关的：runner 只是把 `dut_config.cmd` 里的 `$1` 换成 ELF 路径后 shell 执行，PTY 采集 stdout，按 litmus 的 `Observation`/`Histogram` 标记解析。真正与 DUT 耦合的是**裸机 harness 胶水层**（`spike-litmus-harness/`），它实现 HTIF 约定（`tohost`/`fromhost`、加载基址 `0x80000000`）。一个 DUT 可用，当且仅当：能加载裸机 ELF 并在 `0x80000000` 取指；hart 数 ≥ 测试 hart 数 + 1（litmus7 是"控制器 + 工作线程"模型，hart 0 永远是控制器）；输出/退出通道能被 HTIF 桩驱动且落到 PTY 可捕获的 stdout。
 
 spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF，同一套 harness 预期可用，各需一次 smoke；NEMU 不说 HTIF（退出走 `nemu_trap`、控制台走 UART16550、单 hart per process），需要独立的 `nemu-litmus-harness`（协作式纤程调度，已有）。因此接入一个新的 HTIF DUT，通常只是改一份 `dut_config`（cmd / emu_path / 核数）加一次 smoke。
+
+## 代码架构：每条轴在哪里、改起来难不难
+
+生成器代码全在 `fuzzer/generator/core/multicore/`（11 个 `.py`），执行侧（runner/判定/归档）在 `fuzzer/executor/multicore/`。要判断"某条随机化实现紧不紧耦合、后续好不好改"，关键看清**生成 → 渲染 → 校验**这个三角：每条轴都必须在三处保持一致——`GenCtx` 里生成选择、`litmus_exporter` 里渲染成 `.litmus`、`validator` 里校验合法。这是全系统唯一的耦合模式；三角内的接缝把每条轴的改动面压到了最小。模块分工：
+
+| 文件 | 职责 |
+|---|---|
+| `model.py` | 数据模型：`MCProgram`/`HartProgram`/`ModeledEvent`/`SharedVar`/`ObservedReg`/`EventKind` |
+| `families.py` | `FamilySpec` catalog、**`GenCtx`（所有轴的生成入口）**、`build_program`（post-build 应用别名/宽度/interleave）、7 族 builder |
+| `regalloc.py` | `RegAllocator`：按角色（addr/value/dst/scratch）从互斥池分配 |
+| `noise.py` | `NoisePool`：L0/L1 emitter + `sample` + `is_safe` + `SCRATCH` |
+| `litmus_exporter.py` | `MCProgram → .litmus`：宽度表、别名去重 init、interleave 插行 |
+| `validator.py` | `validate()`：soundness 兜底（宽度/fence 位/别名/噪声/observed 定义） |
+| `herd_oracle.py` / `litmus_backend.py` | herd7 求 allowed / litmus7 Makefile 编译 ELF |
+| `generate.py` / `outcome.py` / `selftest.py` | 编排 + 配置 / States·Histogram 解析 / 纯 Python 自检 |
+
+每条随机化轴的精确落点（这张表直接回答"实现都在哪里"）：
+
+| 轴 | 生成（GenCtx / 应用点） | 渲染（exporter） | 校验（validator） |
+|---|---|---|---|
+| 寄存器分配 | `regalloc.RegAllocator`，builder 经 `ctx.alloc` 取 | 隐式：addr_regs 进 init 绑定、作指令操作数 | 无显式（靠池互斥 + 与 RESERVED 不相交保证） |
+| 存值 | `GenCtx.store_value`，builder 调用 | STORE 分支 `ori reg,x0,V` | 无（族 value-insensitive） |
+| fence pred/succ | `GenCtx.fence`，MP builder 用 | FENCE 分支 `fence pred,succ` | fence 位须是 iorw 非空子集 |
+| 同字别名 | `GenCtx.alias_map`，`build_program` post-build 设 `program.alias_map` | init 去重物理变量 + 寄存器绑物理名 | 别名目标∈shared、同组 width/init 一致 |
+| 宽度混用 | `GenCtx.access_width`，`build_program` post-build `replace(ev,width=)` | 宽度表 `_mem_op`/`_load_op` | width∈{1,2,4,8} 且 ≤ 变量 width |
+| L1 噪声 | `noise` emitter/`sample`，`_prologue` + `build_program` interleave | 每条 window 事件后插 `interleave[i]` | 逐行 `NoisePool.is_safe` |
+
+轴的"应用"有两种风格，扩展时择一：builder 内调用（寄存器/存值/fence——族构造时就问 ctx）；或 `build_program` 里 post-build 应用（别名/宽度/interleave——族 builder 完全无感，改 `ModeledEvent` 或 `HartProgram` 字段即可）。后者更省事，加轴不必动任何族。
+
+**耦合性质**：三角是"机械耦合"——加一条语义轴要在三处各加一点，但每处走的都是 generic 机制（宽度表、is_safe 模式、alias_map 解析），彼此不牵扯。真正需要人工维护的隐式契约**只有一条**：`noise.SCRATCH`（`x20`）必须与 `regalloc` 的所有池不相交。目前靠两边常量定义保证（`SCRATCH=("x20",)`，regalloc 池是 x6/x7、x10–x13），扩 scratch 寄存器时这两处要一起改。除此之外各轴彼此正交、可任意组合，加第 N 条轴不触碰前 N−1 条。
+
+**扩展难度分三档**。第一档，对模型不可见的细节轴（如往噪声池加更多指令）：易，只改 `noise.py`（加 emitter + 进 `_ALU3`/`_ALU2I` 白名单，`is_safe` 自动放行）。第二档，改变 litmus 的语义轴（如新事件属性、新屏障种类）：中，`GenCtx` 加方法 + exporter 加渲染分支 + validator 加校验，三处但都局部。第三档，新事件类（AMO/LR/SC/Dependency）：难，要动 `model`（字段）+ exporter（`_event_instructions` 新分支）+ validator（从 `_UNSUPPORTED_KINDS` 解锁并加配对/约束规则）+ families（新 builder），是下一阶段的大件——也正是它能顺带解锁 aq/rl 的原因。

@@ -6,11 +6,11 @@ DiveFuzz-MC 是 DiveFuzz 的多核扩展，用**对形式化内存模型差分**
 
 ## 去哪读什么
 
-想理解系统怎么工作、随机化为什么安全、哪些路受阻——读 **[ARCHITECTURE.md](ARCHITECTURE.md)**。它讲清了数据模型（modeled window 是唯一的语义边界）、GenCtx 的"形状与细节分离"设计、每条轴的 soundness 论证，以及 aq/rl / same-cacheline / mul 三条受阻路的原因。
+想理解系统怎么工作、随机化为什么安全、哪些路受阻——读 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**。它讲清了数据模型（modeled window 是唯一的语义边界）、GenCtx 的"形状与细节分离"设计、每条轴的 soundness 论证、aq/rl / same-cacheline / mul 三条受阻路的原因；末尾「代码架构」一节还给出每条轴的**精确代码落点**（生成→渲染→校验三角）、耦合分析（唯一隐式契约是 `noise.SCRATCH` 与 `regalloc` 池不相交）、以及扩展难度三档分级。
 
-想装环境、生成种子、在 DUT 上跑、读结果、加族加轴——读 **[USAGE.md](USAGE.md)**。它是操作手册，含两个环境坑、两个入口（CLI 生成 / YAML 闭环）、随机化开关语义、判定结果解读，以及扩展时的三道验证关。
+想装环境、生成种子、在 DUT 上跑、读结果、加族加轴——读 **[docs/USAGE.md](docs/USAGE.md)**。它是操作手册，含两个环境坑、两个入口（CLI 生成 / YAML 闭环）、随机化开关语义、判定结果解读、以及扩展时的三道验证关。
 
-想看后续生成/噪声/corpus/reducer 的研究路线——读 `multicore_divefuzz_research_plan.md`。两份 litmus harness（spike 的 HTIF 多 hart 方案、nemu 的协作式纤程方案）的逐行设计与使用手册在各自的 `docs/{DESIGN,MANUAL}.md`；`README.md` / `PROGRESS.md` 是 harness bring-up 期的实现细节与已修 bug 记录。
+想看后续生成/噪声/corpus/reducer 的研究路线——读 [docs/research-plan.md](docs/research-plan.md)。两份 litmus harness（spike 的 HTIF 多 hart 方案、nemu 的协作式纤程方案）的逐行设计与使用手册在各自的 `docs/{DESIGN,MANUAL}.md`；根目录的 `README.md` / `PROGRESS.md` 是 harness bring-up 期的实现细节与已修 bug 记录。
 
 ## 一句话定位
 
