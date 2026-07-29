@@ -47,7 +47,7 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 
 这是整套随机化设计的核心。一个族固定了测试的**形状**（哪些 hart、以什么顺序、访问哪些变量），而所有**具体取值**——用哪些物理寄存器、存什么数值、fence 用什么位组合、访问多宽、变量是否别名——全部委托给 `GenCtx`。族 builder 从不直接读取任何随机化开关，它们只向 ctx 索取：`ctx.alloc` 要寄存器、`ctx.store_value` 要存值、`ctx.fence` 要屏障、`ctx.access_width` 要宽度、`ctx.alias_map` 要别名映射。
 
-这带来一个关键工程性质：**新增一条随机化轴 = 给 GenCtx 加一个方法，不触碰任何族定义**。本轮新加的七条轴都是这么落地的（寄存器/存值/fence/AMO 操作/aq·rl 由 builder 主动索取，别名/宽度/interleave 走 `build_program` post-build，族 builder 完全无感）。
+这带来一个关键工程性质：**新增一条随机化轴 = 给 GenCtx 加一个方法，不触碰任何族定义**。本轮新加的九条轴都是这么落地的（寄存器/存值/fence/AMO 操作/aq·rl/延迟链长由 builder 主动索取，别名/宽度/interleave 走 `build_program` post-build，族 builder 完全无感）。
 
 各轴做了什么、为什么安全：
 
@@ -114,6 +114,8 @@ spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF
 | L1 噪声 | `noise` emitter/`sample`，`_prologue` + `build_program` interleave | 每条 window 事件后插 `interleave[i]` | 逐行 `NoisePool.is_safe` |
 | AMO 操作 | `GenCtx.amo_op`，AMO builder 调用 | AMO 分支 `amo{op}.{w,d}` | amo_op∈{add,swap,and,or,xor,min,max}（probe 确认 maxu/minu 被拒） |
 | aq/rl 位 | `GenCtx.aqrl`，原子 builder 调用 | `_aqrl_suffix` 拼到 AMO/LR/SC 助记符 | （无显式；位在编码内，原子族专用，plain Load/Store 不可带） |
+| 延迟链长 | `GenCtx.delay_amount`，LBdep builder 调用 | DELAY 分支 `add dst,dst,x0`×amount | amount∈[1,16] |
+| 依赖（data/addr/ctrl） | `_dependency` 构造器，LBdep/LBadc builder 用 | DEPENDENCY 分支：data=`add`、addr=xor 依赖加载、ctrl=`beq`+无点标签 | dependency∈{data,addr,ctrl}；addr/ctrl 须有 base addr |
 
 轴的"应用"有两种风格，扩展时择一：builder 内调用（寄存器/存值/fence——族构造时就问 ctx）；或 `build_program` 里 post-build 应用（别名/宽度/interleave——族 builder 完全无感，改 `ModeledEvent` 或 `HartProgram` 字段即可）。后者更省事，加轴不必动任何族。
 

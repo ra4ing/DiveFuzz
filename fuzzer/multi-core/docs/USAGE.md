@@ -34,7 +34,7 @@ python -m generator.main --generate --multicore --seeds 3 \
 
 ## 随机化：`--randomize` 与 `--noise-level`
 
-这两组开关相互独立、可叠加。`--randomize` 打开七条"细节轴"：寄存器分配、存值、fence pred/succ、同字别名、访问宽度混用（这五条作用于 plain load/store 族），加上 AMO 操作与 aq/rl 位（这两条只作用于原子族——plain load/store 编码里没有 aq/rl 位，汇编器会拒绝 `ld.aq`）。它们都集中在 `GenCtx`，彼此正交、可任意组合。`--noise-level L1` 在此之外叠加 interleaving 噪声（在窗口事件之间插 scratch ALU 指令）；`L0` 是惰性单条噪声，`none` 无噪声。
+这两组开关相互独立、可叠加。`--randomize` 打开八条"细节轴"：寄存器分配、存值、fence pred/succ、同字别名、访问宽度混用（这五条作用于 plain load/store 族），加上 AMO 操作与 aq/rl 位（作用于原子族——plain load/store 编码里没有 aq/rl 位，汇编器会拒绝 `ld.aq`）与延迟链长（作用于 LBdep）。它们都集中在 `GenCtx`，彼此正交、可任意组合。`--noise-level L1` 在此之外叠加 interleaving 噪声（在窗口事件之间插 scratch ALU 指令）；`L0` 是惰性单条噪声，`none` 无噪声。
 
 确定性是默认行为，且很重要：**不传 `--randomize` 时，生成器走确定性默认，产物与最初 spike 验证过的 seed 字节一致**——这是回归基准。同一个 `seed_id` 加同一组开关永远产出同一个程序（RNG 用 seed 播种），所以任何种子都可复现。随机化不是"随机一点"，而是把每条轴都打开后，单个族能展开成大量形态各异的变体，大幅提升对同一拓扑的覆盖密度。
 
