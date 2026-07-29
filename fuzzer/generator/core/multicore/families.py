@@ -17,29 +17,40 @@ Each family is a ``FamilySpec``: a named topology (hart count, value semantics)
 plus a builder that turns a seed id + generation context + noise level into a
 concrete ``MCProgram``. Builders are agnostic of every randomization choice --
 they obtain registers from ``ctx.alloc``, store values from ``ctx.store_value``,
-fence events from ``ctx.fence``, and aq/rl bits from ``ctx.aqrl``. Family
+fence events from ``ctx.fence``; the atomic builders additionally obtain the AMO
+operation from ``ctx.amo_op`` and acquire/release bits from ``ctx.aqrl``. Family
 topology stays decoupled from the randomization axes; that decoupling is the
 seam every axis threads through.
 
-Hart count is a property of the family (SB=2, WRC=3, IRIW=4), not a global
-knob. Generating an N-hart test means selecting a family whose topology
+Hart count is a property of the family (SB/AMO/LRSC=2, WRC=3, IRIW=4), not a
+global knob. Generating an N-hart test means selecting a family whose topology
 requires N harts.
 
 Randomization axes live in :class:`GenCtx`. Sound-by-construction axes wired:
 
-- **register allocation** (axis 5): ``ctx.alloc`` shuffles per-role pools.
-- **store values** (axis 4): ``ctx.store_value`` draws a small immediate.
-- **fence pred/succ** (axis 7a): ``ctx.fence`` draws pred/succ from {r,w}.
-- **aq/rl bits** (axis 7b): ``ctx.aqrl`` draws acquire/release bits per op.
+- **register allocation**: ``ctx.alloc`` shuffles per-role pools.
+- **store values**: ``ctx.store_value`` draws a small immediate.
+- **fence pred/succ**: ``ctx.fence`` draws pred/succ from {r,w,rw}.
+- **same-word aliasing**: ``ctx.alias_map`` collapses logical vars onto one word.
+- **access width**: ``ctx.access_width`` re-widths Load/Store events from {1..8}.
+- **AMO operation**: ``ctx.amo_op`` draws from the ops herd7 models.
+- **aq/rl bits**: ``ctx.aqrl`` draws acquire/release bits, on atomics only.
 
-The last two are *semantic* axes -- they change the allowed-outcome set -- but
-herd recomputes it on the emitted litmus, so the comparison stays sound.
+The last five are *semantic* axes -- they change the allowed-outcome set -- but
+herd recomputes it on the emitted litmus, so the comparison stays sound. The
+aq/rl axis threads exclusively through the atomic families: plain Load/Store
+encodings carry no such bits (the assembler rejects ``ld.aq``), so acquire/
+release on plain accesses must be expressed by fence insertion, a separate
+future axis.
 
 Deterministic mode (``randomize=False``, the default) reproduces the
-spike-verified seeds byte-for-byte (fence rw,rw, no aq/rl, value 1).
+spike-verified seeds byte-for-byte for the original families (fence rw,rw, no
+aq/rl, value 1); the atomic families default to ``amoadd.w`` and ``lr.w``/``sc.w``
+with no aq/rl.
 
-All families use only Load/Store/Fence/FenceTso events. AMO/LR/SC/Dependency/
-Delay families are deferred (they need exporter + validator extensions).
+Families now span Load/Store/Fence/FenceTso (SB, LB, MP, MPTSO, CoRR, WRC, IRIW)
+and AMO/LR/SC (AMO atomicity, LR/SC reservation conflict). Dependency/Delay
+events remain deferred.
 """
 
 import random
@@ -67,6 +78,13 @@ _FENCE_BIT_CHOICES = ("r", "w", "rw")
 # Access widths (bytes) for width mixing. Store values are in [_VALUE_MIN,
 # _VALUE_MAX] so they fit any width, including 1 byte.
 _ACCESS_WIDTHS = (1, 2, 4, 8)
+# AMO operations herd7's RISC-V model implements (probe-confirmed; the unsigned
+# maxu/minu are rejected as "not implemented"). Kept in sync with the
+# validator's _AMO_OPS: GenCtx draws must stay inside the validator's set.
+_AMO_OPS = ("add", "swap", "and", "or", "xor", "min", "max")
+# aq/rl ordering-bit combos for atomics (AMO/LR/SC). Plain Load/Store encodings
+# carry no such bits, so this axis threads exclusively through atomic families.
+_AQRL_CHOICES = ((False, False), (True, False), (False, True), (True, True))
 
 
 class GenCtx:
@@ -124,6 +142,24 @@ class GenCtx:
             return self.rng.choice(_ACCESS_WIDTHS)
         return _WIDTH
 
+    def amo_op(self) -> str:
+        """The AMO operation. Default ``add``; when randomizing, an independent
+        draw from the ops herd7 models. A semantic axis -- it changes the
+        allowed set, but herd recomputes it on the emitted litmus."""
+        if self.randomize:
+            return self.rng.choice(_AMO_OPS)
+        return "add"
+
+    def aqrl(self) -> tuple[bool, bool]:
+        """Acquire/release bits for an atomic (AMO/LR/SC) op, returned as
+        ``(aq, rl)``. Default ``(False, False)``; when randomizing, a draw over
+        the four {none, aq, rl, aqrl} combos. Sound only on atomics -- plain
+        Load/Store encodings have no aq/rl bits, so this axis is wired solely
+        into the atomic family builders."""
+        if self.randomize:
+            return self.rng.choice(_AQRL_CHOICES)
+        return (False, False)
+
 
 # --------------------------------------------------------------------------- #
 # Event constructors (register-agnostic; store the symbolic var name, the
@@ -143,6 +179,37 @@ def _store(addr: str, value: int, value_reg: str, aq: bool = False, rl: bool = F
 
 def _load(addr: str, dst: str, aq: bool = False, rl: bool = False) -> ModeledEvent:
     return ModeledEvent(kind=EventKind.LOAD, addr=addr, dst=dst, width=_WIDTH, aq=aq, rl=rl)
+
+
+def _amo(addr: str, op: str, value: int, value_reg: str, dst: str, width: int = 4, aq: bool = False, rl: bool = False) -> ModeledEvent:
+    return ModeledEvent(
+        kind=EventKind.AMO,
+        addr=addr,
+        amo_op=op,
+        value=value,
+        value_reg=value_reg,
+        dst=dst,
+        width=width,
+        aq=aq,
+        rl=rl,
+    )
+
+
+def _lr(addr: str, dst: str, width: int = 4, aq: bool = False, rl: bool = False) -> ModeledEvent:
+    return ModeledEvent(kind=EventKind.LR, addr=addr, dst=dst, width=width, aq=aq, rl=rl)
+
+
+def _sc(addr: str, value: int, value_reg: str, dst: str, width: int = 4, aq: bool = False, rl: bool = False) -> ModeledEvent:
+    return ModeledEvent(
+        kind=EventKind.SC,
+        addr=addr,
+        value=value,
+        value_reg=value_reg,
+        dst=dst,
+        width=width,
+        aq=aq,
+        rl=rl,
+    )
 
 
 def _fence_tso() -> ModeledEvent:
@@ -496,6 +563,100 @@ def _build_iriw(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
     )
 
 
+def _build_amo(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # AMO atomicity (2 harts): both harts perform an atomic read-modify-write
+    # on x; the old value each AMO returns is observed. RVWMO atomicity forbids
+    # both from reading the initial value -- the AMOs are totally ordered.
+    alloc = ctx.alloc
+    alloc.addr("x")
+    addr_regs = alloc.addr_regs()
+    p0_vreg = alloc.value()
+    p1_vreg = alloc.value()
+    p0_val = ctx.store_value()
+    p1_val = ctx.store_value()
+    d0 = alloc.dst(0)
+    d1 = alloc.dst(1)
+    op = ctx.amo_op()
+    aq0, rl0 = ctx.aqrl()
+    aq1, rl1 = ctx.aqrl()
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_amo("x", op, p0_val, p0_vreg, d0, aq=aq0, rl=rl0)],
+        epilogue_noise=[],
+        result_capture=[_obs(0, d0)],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_amo("x", op, p1_val, p1_vreg, d1, aq=aq1, rl=rl1)],
+        epilogue_noise=[],
+        result_capture=[_obs(1, d1)],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"AMO-mc{seed_id}",
+        isa=_ISA,
+        hart_count=2,
+        shared_vars=_shared_vars("x"),
+        hart_programs=[p0, p1],
+        observed=[_obs(0, d0), _obs(1, d1)],
+        oracle_spec={"family": "AMO", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "AMO"},
+    )
+
+
+def _build_lrsc(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # LR/SC reservation conflict (2 harts): P0 does LR then SC on x (observing
+    # the loaded value and the SC success flag); P1 stores to x concurrently.
+    # RVWMO: a store hitting the reservation set between LR and SC must make the
+    # SC fail, so (LR saw the new value) /\ (SC succeeded) is forbidden.
+    alloc = ctx.alloc
+    alloc.addr("x")
+    addr_regs = alloc.addr_regs()
+    sc_vreg = alloc.value()
+    p1_vreg = alloc.value()
+    sc_val = ctx.store_value()
+    p1_val = ctx.store_value()
+    d_lr = alloc.dst(0)
+    d_sc = alloc.dst(0)
+    aq_lr, rl_lr = ctx.aqrl()
+    aq_sc, rl_sc = ctx.aqrl()
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[
+            _lr("x", d_lr, aq=aq_lr, rl=rl_lr),
+            _sc("x", sc_val, sc_vreg, d_sc, aq=aq_sc, rl=rl_sc),
+        ],
+        epilogue_noise=[],
+        result_capture=[_obs(0, d_lr), _obs(0, d_sc)],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_store("x", p1_val, p1_vreg)],
+        epilogue_noise=[],
+        result_capture=[],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"LRSC-mc{seed_id}",
+        isa=_ISA,
+        hart_count=2,
+        shared_vars=_shared_vars("x"),
+        hart_programs=[p0, p1],
+        observed=[_obs(0, d_lr), _obs(0, d_sc)],
+        oracle_spec={"family": "LRSC", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "LRSC"},
+    )
+
 # --------------------------------------------------------------------------- #
 # Catalog
 # --------------------------------------------------------------------------- #
@@ -519,6 +680,8 @@ CATALOG: dict[str, FamilySpec] = {
     "CoRR": FamilySpec("CoRR", harts=2, value_sensitive=False, build=_build_corr),
     "WRC": FamilySpec("WRC", harts=3, value_sensitive=False, build=_build_wrc),
     "IRIW": FamilySpec("IRIW", harts=4, value_sensitive=False, build=_build_iriw),
+    "AMO": FamilySpec("AMO", harts=2, value_sensitive=False, build=_build_amo),
+    "LRSC": FamilySpec("LRSC", harts=2, value_sensitive=False, build=_build_lrsc),
 }
 
 

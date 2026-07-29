@@ -44,6 +44,23 @@ def _load_op(width: int) -> str:
     return {1: "lb", 2: "lh", 4: "lw", 8: "ld"}[width]
 
 
+def _atomic_width_suffix(width: int) -> str:
+    """RISC-V atomics (AMO/LR/SC) only have ``.w`` (32-bit) and ``.d`` (64-bit)
+    forms; sub-word atomics do not exist."""
+    return {4: "w", 8: "d"}[width]
+
+
+def _aqrl_suffix(aq: bool, rl: bool) -> str:
+    """The aq/rl ordering-bit suffix; valid only on AMO/LR/SC encodings."""
+    if aq and rl:
+        return ".aqrl"
+    if aq:
+        return ".aq"
+    if rl:
+        return ".rl"
+    return ""
+
+
 def _event_instructions(event: ModeledEvent, address_regs: dict[str, str]) -> list[str]:
     """Flatten one modeled event into its assembly instruction string(s)."""
     if event.kind is EventKind.STORE:
@@ -59,6 +76,27 @@ def _event_instructions(event: ModeledEvent, address_regs: dict[str, str]) -> li
         return [f"fence {event.pred},{event.succ}"]
     if event.kind is EventKind.FENCE_TSO:
         return ["fence.tso"]
+    if event.kind is EventKind.AMO:
+        addr_reg = address_regs[event.addr]
+        suffix = _aqrl_suffix(event.aq, event.rl)
+        return [
+            f"ori {event.value_reg},x0,{event.value}",
+            f"amo{event.amo_op}.{_atomic_width_suffix(event.width)}{suffix} "
+            f"{event.dst},{event.value_reg},0({addr_reg})",
+        ]
+    if event.kind is EventKind.LR:
+        addr_reg = address_regs[event.addr]
+        return [
+            f"lr.{_atomic_width_suffix(event.width)}{_aqrl_suffix(event.aq, event.rl)} "
+            f"{event.dst},0({addr_reg})"
+        ]
+    if event.kind is EventKind.SC:
+        addr_reg = address_regs[event.addr]
+        return [
+            f"ori {event.value_reg},x0,{event.value}",
+            f"sc.{_atomic_width_suffix(event.width)}{_aqrl_suffix(event.aq, event.rl)} "
+            f"{event.dst},{event.value_reg},0({addr_reg})",
+        ]
     raise ValueError(
         f"Modeled event {event.kind.value} is declared but not yet "
         f"implemented in the exporter (planned for the randomization phase)"

@@ -57,13 +57,20 @@ class ObservedReg:
 
 @dataclass(frozen=True)
 class ModeledEvent:
-    """A single modeled memory event inside a hart's modeled window."""
+    """A single modeled memory event inside a hart's modeled window.
+
+    For AMO events ``amo_op`` names the operation (add/swap/and/or/xor/min/max);
+    it is None for every other kind. AMO/LR/SC only admit widths {4 (.w), 8 (.d)}
+    and may carry ``aq``/``rl`` ordering bits (plain Load/Store cannot -- the
+    encoding has no such bits, and the exporter ignores them on those kinds).
+    """
 
     kind: EventKind
     addr: str | None = None
     dst: str | None = None
     value: int | None = None
     value_reg: str | None = None
+    amo_op: str | None = None
     width: int = 8
     aq: bool = False
     rl: bool = False

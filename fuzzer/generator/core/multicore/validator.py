@@ -22,16 +22,19 @@ from .model import MCProgram, EventKind
 from .noise import NoisePool
 
 # Kinds declared in the model but not yet implemented in the exporter.
-# Load/Store/Fence/FenceTso are fully supported. AMO/LR/SC/Dependency/Delay
-# are deferred to the randomization phase (each needs exporter + validator
-# extensions); emitting one now is a programmer error, not a runtime surprise.
+# Load/Store/Fence/FenceTso/AMO/LR/SC are fully supported. Dependency/Delay
+# remain deferred (each needs exporter + validator extensions); emitting one
+# now is a programmer error, not a runtime surprise.
 _UNSUPPORTED_KINDS = {
-    EventKind.AMO,
-    EventKind.LR,
-    EventKind.SC,
     EventKind.DEPENDENCY,
     EventKind.DELAY,
 }
+# AMO operations herd7's RISC-V model implements (maxu/minu are not modelled,
+# confirmed by probe -- "RISCV operation amomaxu is not implemented (yet)").
+_AMO_OPS = frozenset({"add", "swap", "and", "or", "xor", "min", "max"})
+# Atomics (AMO/LR/SC) only admit .w (4) / .d (8); there are no sub-word atomics.
+_ATOMIC_KINDS = frozenset({EventKind.AMO, EventKind.LR, EventKind.SC})
+_ATOMIC_WIDTHS = (4, 8)
 # Kinds whose ``dst`` register defines an observed value.
 _OBSERVING_KINDS = {EventKind.LOAD, EventKind.AMO, EventKind.LR, EventKind.SC}
 
@@ -121,6 +124,44 @@ def validate(program: MCProgram) -> None:
                 raise ValueError(
                     f"fence on hart {hp.hart_id} has invalid pred/succ "
                     f"'{ev.pred}','{ev.succ}' (must be non-empty subsets of iorw)"
+                )
+            if ev.kind in _ATOMIC_KINDS and ev.width not in _ATOMIC_WIDTHS:
+                raise ValueError(
+                    f"{ev.kind.value} on hart {hp.hart_id} must be width 4 or 8 "
+                    f"(.w/.d), got {ev.width}"
+                )
+            if ev.kind is EventKind.AMO and (
+                not ev.amo_op
+                or ev.amo_op not in _AMO_OPS
+                or ev.dst is None
+                or ev.value_reg is None
+                or ev.value is None
+            ):
+                raise ValueError(
+                    f"AMO on hart {hp.hart_id} needs a valid amo_op "
+                    f"({sorted(_AMO_OPS)}), dst, value_reg, and value"
+                )
+            if ev.kind is EventKind.LR and ev.dst is None:
+                raise ValueError(
+                    f"LR on hart {hp.hart_id} has no destination register"
+                )
+            if ev.kind is EventKind.SC and (
+                ev.dst is None or ev.value_reg is None or ev.value is None
+            ):
+                raise ValueError(
+                    f"SC on hart {hp.hart_id} needs dst, value_reg, and value"
+                )
+
+        # LR/SC pairing: every SC must be preceded by an LR in program order on
+        # the same hart -- an SC without a reservation has no defined semantics.
+        seen_lr = False
+        for ev in hp.modeled_window:
+            if ev.kind is EventKind.LR:
+                seen_lr = True
+            elif ev.kind is EventKind.SC and not seen_lr:
+                raise ValueError(
+                    f"SC on hart {hp.hart_id} has no preceding LR "
+                    f"(a reservation is required)"
                 )
 
         for noise in (

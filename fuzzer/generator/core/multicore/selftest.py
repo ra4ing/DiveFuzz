@@ -43,9 +43,22 @@ def _check_programs() -> None:
                 assert f"P{h}" in litmus, (
                     f"{family}/{noise}: litmus missing column P{h}"
                 )
-            for token in ("RISCV", "exists", "sd", "ld"):
+            # Always-present framing tokens.
+            for token in ("RISCV", "exists"):
                 assert token in litmus, (
                     f"{family}/{noise}: litmus missing token '{token}'"
+                )
+            # The memory-op token is family-specific: plain load/store families
+            # emit sd/ld; atomic families emit AMO/LR/SC mnemonics.
+            if family == "AMO":
+                assert "amo" in litmus, f"{family}/{noise}: no AMO instruction"
+            elif family == "LRSC":
+                assert "lr." in litmus and "sc." in litmus, (
+                    f"{family}/{noise}: no LR/SC instructions"
+                )
+            else:
+                assert "sd" in litmus and "ld" in litmus, (
+                    f"{family}/{noise}: missing sd/ld"
                 )
             # Fence families must render their barrier.
             if family == "MP":
@@ -181,8 +194,43 @@ def _check_l1_noise() -> None:
     assert "x20" in export_litmus(prog), "noise=L1 produced no scratch noise"
 
 
+def _check_atomic() -> None:
+    # Deterministic AMO: amoadd.w (op=add), no aq/rl suffix; must validate.
+    det_amo = build_program(0, "AMO", "none", random.Random(0))
+    validate(det_amo)
+    lamo = export_litmus(det_amo)
+    assert "amoadd.w" in lamo, "deterministic AMO should render amoadd.w"
+    assert ".aq" not in lamo and ".rl" not in lamo, (
+        "deterministic AMO must not emit aq/rl bits"
+    )
+    # Deterministic LR/SC: lr.w / sc.w, no aq/rl; must validate (LR precedes SC).
+    det_lrsc = build_program(0, "LRSC", "none", random.Random(0))
+    validate(det_lrsc)
+    llr = export_litmus(det_lrsc)
+    assert "lr.w " in llr and "sc.w " in llr, (
+        "deterministic LRSC should render lr.w/sc.w"
+    )
+    assert llr.index("lr.") < llr.index("sc."), "LR must precede SC in program order"
+    # Randomized AMO must vary the op and emit aq/rl bits across draws; every
+    # randomized atomic program must still validate.
+    seen_op: set[str] = set()
+    seen_aqrl = False
+    for seed in range(60):
+        prog = build_program(0, "AMO", "none", random.Random(seed), randomize=True)
+        validate(prog)
+        lit = export_litmus(prog)
+        for op in ("amoadd", "amoswap", "amoand", "amoor", "amoxor", "amomax", "amomin"):
+            if op + "." in lit:
+                seen_op.add(op)
+        if ".aq" in lit or ".rl" in lit:
+            seen_aqrl = True
+    assert len(seen_op) >= 3, f"randomize varied too few AMO ops: {sorted(seen_op)}"
+    assert seen_aqrl, "randomize=True never emitted aq/rl bits on AMO across 60 seeds"
+
+
 def main() -> None:
     _check_programs()
+    _check_atomic()
     _check_randomized()
     _check_ordering_randomization()
     _check_aliasing()

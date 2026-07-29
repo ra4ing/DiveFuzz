@@ -22,7 +22,7 @@ DiveFuzz-MC 的核心 trick 是**对形式化内存模型做差分**：生成一
 
 ## 族：固定拓扑，而非参数化模板
 
-当前 catalog 有七个族，每个是一条**固定的多 hart 拓扑**：
+当前 catalog 有九个族，每个是一条**固定的多 hart 拓扑**：
 
 | 族 | hart | 拓扑要点 | 主要压测目标 |
 |---|---|---|---|
@@ -32,6 +32,8 @@ DiveFuzz-MC 的核心 trick 是**对形式化内存模型做差分**：生成一
 | CoRR | 2 | 一个核写一次，另一个核对同地址读两次 | 同地址 coherence（禁止 new→old） |
 | WRC | 3 | 写→读→写的因果链跨三核传递 | coherence 因果传递 |
 | IRIW | 4 | 两个写者 + 两个独立读者 | 独立写的可见序一致性 |
+| AMO | 2 | 两个核各做一次原子 read-modify-write，观测返回的旧值 | AMO 原子性（禁止两核都读到初值） |
+| LRSC | 2 | P0 做 LR+SC 同址，P1 并发 store 同址 | LR/SC 预留冲突（介入 store 须令 SC 失败） |
 
 hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-hart 拓扑，IRIW 定义上就是 4-hart——"5 hart 的 SB"是另一个测试。因此 `--hart-count N` 是一个**过滤器**：只挑选拓扑要求 N hart 的族，而不是把 N 强加到所有族上。族选择本身是确定性轮换 `test_families[(seed_id - offset) % len]`，保证覆盖可复现。
 
@@ -39,7 +41,7 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 
 这是整套随机化设计的核心。一个族固定了测试的**形状**（哪些 hart、以什么顺序、访问哪些变量），而所有**具体取值**——用哪些物理寄存器、存什么数值、fence 用什么位组合、访问多宽、变量是否别名——全部委托给 `GenCtx`。族 builder 从不直接读取任何随机化开关，它们只向 ctx 索取：`ctx.alloc` 要寄存器、`ctx.store_value` 要存值、`ctx.fence` 要屏障、`ctx.access_width` 要宽度、`ctx.alias_map` 要别名映射。
 
-这带来一个关键工程性质：**新增一条随机化轴 = 给 GenCtx 加一个方法，不触碰任何族定义**。本轮新加的五条轴都是这么落地的。有些轴（别名、宽度）甚至在 `build_program` 里 post-build 应用——族 builder 完全无感。
+这带来一个关键工程性质：**新增一条随机化轴 = 给 GenCtx 加一个方法，不触碰任何族定义**。本轮新加的七条轴都是这么落地的（寄存器/存值/fence/AMO 操作/aq·rl 由 builder 主动索取，别名/宽度/interleave 走 `build_program` post-build，族 builder 完全无感）。
 
 各轴做了什么、为什么安全：
 
@@ -53,17 +55,21 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 
 **访问宽度混用**。每个 Load/Store 事件的宽度独立从 `{1,2,4,8}` 抽取（sb/sh/sw/sd 与 lb/lh/lw/ld）。语义轴——herd 建模子字 coherence，allowed 集重算。存值在 `[1,127]` 保证放得进任何宽度（含 1 字节）。
 
+**AMO 操作**。原子族里每个 AMO 事件的操作（add/swap/and/or/xor/min/max）独立抽取——probe 确认 herd7 的 RISC-V 模型实现了这七个（unsigned max/min 被拒为 "not implemented"）。语义轴——它改变 allowed 集，herd 重算。
+
+**aq/rl 位**。AMO/LR/SC 事件的 acquire/release 位从 {none,aq,rl,aqrl} 抽取。语义轴——herd 重算。这条轴只在原子族上成立：plain load/store 编码里没有 aq/rl 位（汇编器拒绝 `ld.aq`），所以对 plain 访问做 acquire/release 必须靠 fence 插入，是一条独立的未来轴。这正是当初 aq/rl 受阻、如今随 AMO/LR-SC 解锁的那条轴。
+
 **L1 噪声（interleaving）**。这是唯一一条"抖动轴"而非"语义轴"。噪声指令只写 scratch 寄存器 `x20`，而 x20 与 modeled window 用到的所有寄存器（地址 x6/x7、值 x12/x13、观测 x10/x11）以及 harness/ABI 保留集都不相交。因此无论噪声插在 prologue、window 事件之间、还是 epilogue，对 window 的访存与观测结果都是零影响——herd 根本看不见它。interleaving（夹在 window 事件之间）是高价值部分：它把 load/store 在时间上拉开，正是压流水线时序、暴露重排敏感 bug 的核心机制。
 
 ## 正确性的核心：允许集永远以 herd 对"实际发出的 litmus"的求解为准
 
 理解这套系统的正确性，关键在于认识到 allowed 集**不是一个固定的东西**，而是 herd7 对我们**实际发出的那份 .litmus** 求解的结果。因此一条随机化轴是否安全，只取决于两件事：发出的程序仍是 herd 能建模、且汇编器能编译的东西；观测直方图的键与 allowed 集的键一致。
 
-由此分两类轴。第一类（寄存器重命名、scratch 噪声）**可证明地不改变 allowed 集**——它们对内存模型不可见。第二类（存值、fence 位、别名、宽度）**确实改变** allowed 集，但 herd 在新 litmus 上重算，所以比对仍然有效。唯一的失败模式，是发出了 herd 模型之外或汇编器语法之外的东西。这正是本轮反复印证的纪律：**每引入一种新构造，必须先用 herd7 和真实汇编器双重探针验证**，三者缺一不可。本轮有三种构造没通过这个探针，记录如下。
+由此分两类轴。第一类（寄存器重命名、scratch 噪声）**可证明地不改变 allowed 集**——它们对内存模型不可见。第二类（存值、fence 位、别名、宽度、AMO 操作、aq/rl 位）**确实改变** allowed 集，但 herd 在新 litmus 上重算，所以比对仍然有效。唯一的失败模式，是发出了 herd 模型之外或汇编器语法之外的东西。这正是本轮反复印证的纪律：**每引入一种新构造，必须先用 herd7 和真实汇编器双重探针验证**，三者缺一不可。本轮有两种构造仍没通过这个探针（记录如下）；aq/rl 则是先受阻后解锁的典型——见下。
 
-## 三条受阻的路
+## 受阻与已解锁的路
 
-**aq/rl 位**。曾尝试给 plain load/store 加 `.aq`/`.rl` 后缀做 acquire/release。herd7 接受（它把注解当建模语义），但真实 RISC-V 汇编器拒绝——plain load/store 的编码里根本没有 aq/rl 位，这些位只存在于 AMO/LR/SC 指令上。所以这条轴要等 AMO/LR-SC 族落地才能解锁；在那之前，plain 访问的 acquire/release 语义只能用 fence 插入来表达（一条未来轴）。
+**aq/rl 位（已解锁）**。曾尝试给 plain load/store 加 `.aq`/`.rl` 做 acquire/release：herd7 接受（把注解当建模语义），但真实汇编器拒绝——plain load/store 的编码里根本没有这些位。然而 aq/rl 位本就存在于 AMO/LR/SC 指令上，所以随原子族落地，这条轴现在以 AMO/LR/SC 为载体真正可用（见上「aq/rl 位」轴）——探针确认 herd7 接受 `amo{op}.{w,d}[.aqrl]` 与 `lr/sc.{w,d}[.aqrl]` 全组合。plain 访问的 acquire/release 仍只能用 fence 插入表达，是一条独立的未来轴。
 
 **same-cacheline 布局**。曾想控制变量落在同一缓存行的不同字（间隔 8/16 字节）以压 MSH/存储体冲突。但 litmus7 不支持数组声明（`uint64_t a[2]` 被拒），也不支持指针算术（`x+1` 被拒），所以从 `.litmus` 层面只能表达 same-word 别名（多个寄存器指向同一变量）。same-cacheline-different-word 与跨页需要改 harness 的内存布局代码，是另一个独立的大工程。
 
@@ -100,9 +106,11 @@ spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF
 | 同字别名 | `GenCtx.alias_map`，`build_program` post-build 设 `program.alias_map` | init 去重物理变量 + 寄存器绑物理名 | 别名目标∈shared、同组 width/init 一致 |
 | 宽度混用 | `GenCtx.access_width`，`build_program` post-build `replace(ev,width=)` | 宽度表 `_mem_op`/`_load_op` | width∈{1,2,4,8} 且 ≤ 变量 width |
 | L1 噪声 | `noise` emitter/`sample`，`_prologue` + `build_program` interleave | 每条 window 事件后插 `interleave[i]` | 逐行 `NoisePool.is_safe` |
+| AMO 操作 | `GenCtx.amo_op`，AMO builder 调用 | AMO 分支 `amo{op}.{w,d}` | amo_op∈{add,swap,and,or,xor,min,max}（probe 确认 maxu/minu 被拒） |
+| aq/rl 位 | `GenCtx.aqrl`，原子 builder 调用 | `_aqrl_suffix` 拼到 AMO/LR/SC 助记符 | （无显式；位在编码内，原子族专用，plain Load/Store 不可带） |
 
 轴的"应用"有两种风格，扩展时择一：builder 内调用（寄存器/存值/fence——族构造时就问 ctx）；或 `build_program` 里 post-build 应用（别名/宽度/interleave——族 builder 完全无感，改 `ModeledEvent` 或 `HartProgram` 字段即可）。后者更省事，加轴不必动任何族。
 
 **耦合性质**：三角是"机械耦合"——加一条语义轴要在三处各加一点，但每处走的都是 generic 机制（宽度表、is_safe 模式、alias_map 解析），彼此不牵扯。真正需要人工维护的隐式契约**只有一条**：`noise.SCRATCH`（`x20`）必须与 `regalloc` 的所有池不相交。目前靠两边常量定义保证（`SCRATCH=("x20",)`，regalloc 池是 x6/x7、x10–x13），扩 scratch 寄存器时这两处要一起改。除此之外各轴彼此正交、可任意组合，加第 N 条轴不触碰前 N−1 条。
 
-**扩展难度分三档**。第一档，对模型不可见的细节轴（如往噪声池加更多指令）：易，只改 `noise.py`（加 emitter + 进 `_ALU3`/`_ALU2I` 白名单，`is_safe` 自动放行）。第二档，改变 litmus 的语义轴（如新事件属性、新屏障种类）：中，`GenCtx` 加方法 + exporter 加渲染分支 + validator 加校验，三处但都局部。第三档，新事件类（AMO/LR/SC/Dependency）：难，要动 `model`（字段）+ exporter（`_event_instructions` 新分支）+ validator（从 `_UNSUPPORTED_KINDS` 解锁并加配对/约束规则）+ families（新 builder），是下一阶段的大件——也正是它能顺带解锁 aq/rl 的原因。
+**扩展难度分三档**。第一档，对模型不可见的细节轴（如往噪声池加更多指令）：易，只改 `noise.py`（加 emitter + 进 `_ALU3`/`_ALU2I` 白名单，`is_safe` 自动放行）。第二档，改变 litmus 的语义轴（如新事件属性、新屏障种类）：中，`GenCtx` 加方法 + exporter 加渲染分支 + validator 加校验，三处但都局部。第三档，新事件类：已落地的 AMO/LR/SC 走通了全三角——`model` 加 `amo_op` 字段、exporter 加 AMO/LR/SC 三分支、validator 从 `_UNSUPPORTED_KINDS` 解锁并加宽度/字段/LR·SC 配对规则、families 加 `amo_op`/`aqrl` 两轴与 AMO/LRSC 两个 builder；剩下的 Dependency/Delay 仍需同等改造。每一档都遵循同一纪律：新构造上线前先 herd7 + 汇编器双探针——本轮 AMO/LR/SC 的探针确认 herd7 接受 `amo{op}.{w,d}[.aqrl]`、`lr.{w,d}[.aqrl]`、`sc.{w,d}[.aqrl]` 全组合，且 litmus7 能编 ELF、spike 能跑、oracle 判 SUCCESS。
