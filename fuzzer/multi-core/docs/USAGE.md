@@ -51,3 +51,15 @@ python -m generator.main --generate --multicore --seeds 3 \
 加一个族，只需在 `families.py` 写一个 `_build_xxx(seed_id, ctx, noise_level)`（用 ctx 要寄存器/值/屏障，用 `_load`/`_store`/`_fence` 构造事件），再在 `CATALOG` 加一条 `FamilySpec`。它自动出现在 `--test-family` 的可选值、selftest、`available_families()` 里，无需改别处。族的 hart 数写在 spec 里。
 
 加一条随机化轴，给 `GenCtx` 加一个方法（返回该轴的随机选择），然后在 `build_program` 里应用它（post-build 最省事，比如直接改 `hp.modeled_window` 或加字段）。族 builder 不用动。轴上线前必须过三道关，缺一不可：用 herd7 探针确认新构造可被建模；用 `riscv64-linux-gnu-gcc` 探针确认能汇编；在 selftest 加一条断言（确定性模式不变、随机模式产生预期变化）。这三步是本轮 aq/rl、mul、same-cacheline 三次踩坑换来的纪律——"herd 接受"绝不等于"能跑"。
+
+## 回归压力测试
+
+每次改了生成器（加族、加轴、改 exporter/validator）之后，跑 `fuzzer/scripts/multicore_stress.py` 当回归闸门。它的设计直接对着生成器唯一的失败模式——「随机化发出 herd7 不认、或汇编器编不过的构造」——做压力测试：对每个族用大量随机种子（开满所有随机化轴、轮流混入 none/L0/L1 噪声）逐个过「校验 → herd7 接受 → litmus7 编译」，再从每族抽一个跑完整 spike+oracle 闭环。退出码 0 表示全部通过（每个种子都合法、可建模、可编译、且 spike 采样判定 SUCCESS），非 0 即有回归，会上卷每个失败种子的族/seed/噪声层级与报错尾行。
+
+在容器里从 `fuzzer/` 目录跑（默认每族 20 个种子 + 每族 1 个 spike 采样，约 10 分钟）：
+
+```
+python3 scripts/multicore_stress.py
+```
+
+常用选项：`--seeds 50` 加大压力；`--no-spike` 只跑快的 herd+编译部分（约 2 分钟）适合迭代时快速验证；`--families SB,MP,AMO` 只测指定族。工具路径默认指向容器布局，可用 `HERD7`/`LITMUS7`/`LITMUS7_SHARE`/`SPIKE` 环境变量覆盖——注意 `LITMUS7_SHARE` 必须指向真正含 `riscv.cfg` 的 opam switch share 目录（即上文「两个已知的坑」那条，Makefile 的默认值是错的）。脚本跑完会自动 `make clean` 清掉自己的编译产物。
