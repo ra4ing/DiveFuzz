@@ -98,10 +98,35 @@ def _event_instructions(event: ModeledEvent, address_regs: dict[str, str]) -> li
             f"{event.dst},{event.value_reg},0({addr_reg})",
         ]
     if event.kind is EventKind.DEPENDENCY:
-        # In-window data dependency: link a prior load's value_reg into dst.
-        # Address/control dependencies need a dependent-load / branch mechanism
-        # and are deferred; the validator admits dependency == "data" only.
-        return [f"add {event.dst},{event.value_reg},x0"]
+        if event.dependency == "data":
+            # In-window data dependency: link a prior load's value_reg into dst.
+            return [f"add {event.dst},{event.value_reg},x0"]
+        if event.dependency == "addr":
+            # Address dependency: dependent-load `addr` through an address that
+            # syntactically depends on value_reg (a prior load). dst doubles as
+            # the scratch: xor zeroes it (depends on value_reg), add fixes it to
+            # the base, then ld reads that address and writes the result -- the
+            # address is read before the writeback, so there is no hazard.
+            addr_reg = address_regs[event.addr]
+            return [
+                f"xor {event.dst},{event.value_reg},{event.value_reg}",
+                f"add {event.dst},{event.dst},{addr_reg}",
+                f"{_load_op(event.width)} {event.dst},0({event.dst})",
+            ]
+        if event.dependency == "ctrl":
+            # Control dependency: branch on value_reg (a prior load) over the
+            # dependent load of `addr`. The forward label is unique within a
+            # hart (dst registers are distinct per hart) and per-process in
+            # litmus (separate P0/P1 bodies), so L_{dst} never clashes. The
+            # label is dot-free: litmus7's RISC-V lexer rejects dot-prefixed
+            # labels (probed -- .Lx is a lex error, L_x is accepted).
+            addr_reg = address_regs[event.addr]
+            label = f"L_{event.dst}"
+            return [
+                f"beq {event.value_reg},x0,{label}",
+                f"{_load_op(event.width)} {event.dst},0({addr_reg})",
+                f"{label}:",
+            ]
     if event.kind is EventKind.DELAY:
         # In-window load-to-use delay: a data-dependency chain of `amount`
         # adds on dst (adds zero, so value-preserving). Perturbs pipeline

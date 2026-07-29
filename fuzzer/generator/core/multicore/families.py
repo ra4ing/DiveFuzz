@@ -52,7 +52,7 @@ Families span plain Load/Store/Fence/FenceTso (SB, LB, MP, MPTSO, CoRR, WRC,
 IRIW, CoWR, CoRW, CoWW, 2+2W) and AMO/LR/SC (AMO atomicity, LR/SC reservation
 conflict). The coherence/store-store families (CoWR/CoRW/CoWW/2+2W) are
 value-sensitive -- they use :func:`_distinct_values` so competing writes differ;
-the rest are value-insensitive. Dependency/Delay events are wired as in-window data-dependency constructs (``add`` chains via :func:`_dependency` / :func:`_delay`); address/control dependencies (dependent-load / branch) remain deferred.
+the rest are value-insensitive. Dependency/Delay events are wired as in-window constructs: data (``add``), address (xor dependent-load), and control (branch-over) dependencies via :func:`_dependency`, plus load-to-use delays via :func:`_delay`.
 """
 
 import random
@@ -223,9 +223,14 @@ def _sc(addr: str, value: int, value_reg: str, dst: str, width: int = 4, aq: boo
     )
 
 
-def _dependency(dst: str, value_reg: str, dependency: str = "data") -> ModeledEvent:
+def _dependency(dst: str, value_reg: str, dependency: str = "data", addr: str | None = None, width: int = _WIDTH) -> ModeledEvent:
     return ModeledEvent(
-        kind=EventKind.DEPENDENCY, dst=dst, value_reg=value_reg, dependency=dependency
+        kind=EventKind.DEPENDENCY,
+        dst=dst,
+        value_reg=value_reg,
+        dependency=dependency,
+        addr=addr,
+        width=width,
     )
 
 
@@ -906,6 +911,62 @@ def _build_lbdep(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         metadata={"family": "LBdep"},
     )
 
+def _build_lbadc(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # LB with address + control dependency (2 harts): P0 loads y then
+    # dependent-loads x through an ADDRESS dependency on y (xor-trick); P1 loads
+    # x then dependent-loads y through a CONTROL dependency on x (branch-over).
+    # Each hart then stores its dependent-load target. Under RVWMO neither
+    # dependency orders the two loads, so the LB-style outcomes stay allowed --
+    # the constructs probe the DUT's address-generation interlock and
+    # control-flow + load ordering without changing the allowed set.
+    alloc = ctx.alloc
+    alloc.addr("x")
+    alloc.addr("y")
+    addr_regs = alloc.addr_regs()
+    vreg = alloc.value()
+    vx = ctx.store_value()
+    vy = ctx.store_value()
+    d0 = alloc.dst(0)
+    d_a = alloc.dst(0)
+    d1 = alloc.dst(1)
+    d_c = alloc.dst(1)
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[
+            _load("y", d0),
+            _dependency(d_a, d0, "addr", "x"),
+            _store("x", vx, vreg),
+        ],
+        epilogue_noise=[],
+        result_capture=[_obs(0, d0), _obs(0, d_a)],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[
+            _load("x", d1),
+            _dependency(d_c, d1, "ctrl", "y"),
+            _store("y", vy, vreg),
+        ],
+        epilogue_noise=[],
+        result_capture=[_obs(1, d1), _obs(1, d_c)],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"LBadc-mc{seed_id}",
+        isa=_ISA,
+        hart_count=2,
+        shared_vars=_shared_vars("x", "y"),
+        hart_programs=[p0, p1],
+        observed=[_obs(0, d0), _obs(0, d_a), _obs(1, d1), _obs(1, d_c)],
+        oracle_spec={"family": "LBadc", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "LBadc"},
+    )
+
 # --------------------------------------------------------------------------- #
 # Catalog
 # --------------------------------------------------------------------------- #
@@ -936,6 +997,7 @@ CATALOG: dict[str, FamilySpec] = {
     "CoWW": FamilySpec("CoWW", harts=2, value_sensitive=True, build=_build_coww),
     "2+2W": FamilySpec("2+2W", harts=3, value_sensitive=True, build=_build_2plus2w),
     "LBdep": FamilySpec("LBdep", harts=2, value_sensitive=False, build=_build_lbdep),
+    "LBadc": FamilySpec("LBadc", harts=2, value_sensitive=False, build=_build_lbadc),
 }
 
 

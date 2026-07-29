@@ -229,16 +229,25 @@ def _check_atomic() -> None:
 
 
 def _check_dependency_delay() -> None:
-    # Dependency/Delay render as in-window `add` data-dependency constructs and
-    # validate; LBdep exercises both. Deterministic delay amount is 4.
+    # Dependency (data/addr/ctrl) + Delay render their constructs and validate;
+    # LBdep exercises data + delay, LBadc exercises addr + ctrl. Delay amount is 4.
     det = build_program(0, "LBdep", "none", random.Random(0))
     validate(det)
     lit = export_litmus(det)
     assert lit.count("add x") >= 4, "LBdep deterministic should emit a delay chain"
     # Randomized LBdep still validates and emits the dependency/delay adds.
     validate(build_program(0, "LBdep", "none", random.Random(5), randomize=True))
-    # The validator rejects delay amounts outside [1, 16] and unsupported
-    # dependency kinds (addr/ctrl are deferred).
+    # LBadc exercises address (xor dependent-load) + control (branch-over)
+    # dependencies; both render their constructs and validate, det + randomized.
+    adc = build_program(0, "LBadc", "none", random.Random(0))
+    validate(adc)
+    adc_lit = export_litmus(adc)
+    assert "xor x" in adc_lit, "LBadc should render the address-dependency xor"
+    assert "beq x" in adc_lit and "L_x" in adc_lit, (
+        "LBadc should render the control-dependency branch + label"
+    )
+    validate(build_program(0, "LBadc", "none", random.Random(7), randomize=True))
+    # The validator rejects delay amounts outside [1, 16].
     from dataclasses import replace
     bad = replace(det.hart_programs[0].modeled_window[1], amount=0)
     det.hart_programs[0].modeled_window[1] = bad

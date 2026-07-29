@@ -25,10 +25,10 @@ from .noise import NoisePool
 # (Load/Store/Fence/FenceTso/AMO/LR/SC/Dependency/Delay). This set is kept as
 # the generic "declared but not implemented" guard; it is currently empty.
 _UNSUPPORTED_KINDS: set[EventKind] = set()
-# Dependency kinds the exporter renders. Address/control dependencies need a
-# dependent-load / branch mechanism (a tmp register or labels) and are deferred;
-# only the in-window data dependency is wired for now.
-_DEPENDENCY_KINDS = frozenset({"data"})
+# Dependency kinds the exporter renders. "data" is an in-window add; "addr" is a
+# dependent-load via the xor-trick (dst doubles as scratch); "ctrl" is a branch
+# over a dependent load. All three are herd-accepted and litmus7-compilable.
+_DEPENDENCY_KINDS = frozenset({"data", "addr", "ctrl"})
 # Delay chain length bounds (a load-to-use chain; kept modest).
 _DELAY_AMOUNT_MAX = 16
 # AMO operations herd7's RISC-V model implements (maxu/minu are not modelled,
@@ -171,6 +171,11 @@ def validate(program: MCProgram) -> None:
                 if ev.dst is None or ev.value_reg is None:
                     raise ValueError(
                         f"Dependency on hart {hp.hart_id} needs dst and value_reg"
+                    )
+                if ev.dependency in ("addr", "ctrl") and ev.addr is None:
+                    raise ValueError(
+                        f"{ev.dependency} dependency on hart {hp.hart_id} "
+                        f"needs a base addr (shared var)"
                     )
             if ev.kind is EventKind.DELAY:
                 if ev.dst is None:
