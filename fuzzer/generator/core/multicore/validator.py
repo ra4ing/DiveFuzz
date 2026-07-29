@@ -21,14 +21,16 @@ proven safe is rejected with a specific ``ValueError``.
 from .model import MCProgram, EventKind
 from .noise import NoisePool
 
-# Kinds declared in the model but not yet implemented in the exporter.
-# Load/Store/Fence/FenceTso/AMO/LR/SC are fully supported. Dependency/Delay
-# remain deferred (each needs exporter + validator extensions); emitting one
-# now is a programmer error, not a runtime surprise.
-_UNSUPPORTED_KINDS = {
-    EventKind.DEPENDENCY,
-    EventKind.DELAY,
-}
+# All modeled event kinds are now implemented in the exporter
+# (Load/Store/Fence/FenceTso/AMO/LR/SC/Dependency/Delay). This set is kept as
+# the generic "declared but not implemented" guard; it is currently empty.
+_UNSUPPORTED_KINDS: set[EventKind] = set()
+# Dependency kinds the exporter renders. Address/control dependencies need a
+# dependent-load / branch mechanism (a tmp register or labels) and are deferred;
+# only the in-window data dependency is wired for now.
+_DEPENDENCY_KINDS = frozenset({"data"})
+# Delay chain length bounds (a load-to-use chain; kept modest).
+_DELAY_AMOUNT_MAX = 16
 # AMO operations herd7's RISC-V model implements (maxu/minu are not modelled,
 # confirmed by probe -- "RISCV operation amomaxu is not implemented (yet)").
 _AMO_OPS = frozenset({"add", "swap", "and", "or", "xor", "min", "max"})
@@ -36,7 +38,16 @@ _AMO_OPS = frozenset({"add", "swap", "and", "or", "xor", "min", "max"})
 _ATOMIC_KINDS = frozenset({EventKind.AMO, EventKind.LR, EventKind.SC})
 _ATOMIC_WIDTHS = (4, 8)
 # Kinds whose ``dst`` register defines an observed value.
-_OBSERVING_KINDS = {EventKind.LOAD, EventKind.AMO, EventKind.LR, EventKind.SC}
+_OBSERVING_KINDS = {
+    EventKind.LOAD,
+    EventKind.AMO,
+    EventKind.LR,
+    EventKind.SC,
+    # Dependency/Delay define a dst register with a herd-computable value (a
+    # data-dependent copy / a preserved load value), so their dst is observable.
+    EventKind.DEPENDENCY,
+    EventKind.DELAY,
+}
 
 # Valid letters in a fence pred/succ field (RISC-V iorw bits).
 _FENCE_BITS = frozenset("iorw")
@@ -151,6 +162,26 @@ def validate(program: MCProgram) -> None:
                 raise ValueError(
                     f"SC on hart {hp.hart_id} needs dst, value_reg, and value"
                 )
+            if ev.kind is EventKind.DEPENDENCY:
+                if ev.dependency not in _DEPENDENCY_KINDS:
+                    raise ValueError(
+                        f"Dependency on hart {hp.hart_id} has unsupported kind "
+                        f"{ev.dependency!r}; supported: {sorted(_DEPENDENCY_KINDS)}"
+                    )
+                if ev.dst is None or ev.value_reg is None:
+                    raise ValueError(
+                        f"Dependency on hart {hp.hart_id} needs dst and value_reg"
+                    )
+            if ev.kind is EventKind.DELAY:
+                if ev.dst is None:
+                    raise ValueError(
+                        f"Delay on hart {hp.hart_id} has no dst register"
+                    )
+                if not (1 <= ev.amount <= _DELAY_AMOUNT_MAX):
+                    raise ValueError(
+                        f"Delay on hart {hp.hart_id} has amount {ev.amount}, "
+                        f"must be in [1, {_DELAY_AMOUNT_MAX}]"
+                    )
 
         # LR/SC pairing: every SC must be preceded by an LR in program order on
         # the same hart -- an SC without a reservation has no defined semantics.

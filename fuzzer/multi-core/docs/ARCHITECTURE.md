@@ -22,7 +22,7 @@ DiveFuzz-MC 的核心 trick 是**对形式化内存模型做差分**：生成一
 
 ## 族：固定拓扑，而非参数化模板
 
-当前 catalog 有十三个族，每个是一条**固定的多 hart 拓扑**：
+当前 catalog 有十四个族，每个是一条**固定的多 hart 拓扑**：
 
 | 族 | hart | 拓扑要点 | 主要压测目标 |
 |---|---|---|---|
@@ -38,6 +38,7 @@ DiveFuzz-MC 的核心 trick 是**对形式化内存模型做差分**：生成一
 | CoRW | 2 | P0 读、写、再读同址，P1 并发写 | 同址 coherence（读-写一致性，3 态） |
 | CoWW | 2 | P0 连写两个不同值同址，P1 读 | 同址 coherence（读者可观测中间写入值） |
 | 2+2W | 3 | P0 写 y→x、P1 写 x→y（无 fence），P2 读两址 | 跨址 store-store 重排可见性（9 态） |
+| LBdep | 2 | LB 拓扑，P0 在 load 后插延迟链、P1 经数据依赖链接观测 | in-window 数据依赖/延迟扰动（load-to-use 流水线压力） |
 
 hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-hart 拓扑，IRIW 定义上就是 4-hart——"5 hart 的 SB"是另一个测试。因此 `--hart-count N` 是一个**过滤器**：只挑选拓扑要求 N hart 的族，而不是把 N 强加到所有族上。族选择本身是确定性轮换 `test_families[(seed_id - offset) % len]`，保证覆盖可复现。
 
@@ -117,4 +118,4 @@ spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF
 
 **耦合性质**：三角是"机械耦合"——加一条语义轴要在三处各加一点，但每处走的都是 generic 机制（宽度表、is_safe 模式、alias_map 解析），彼此不牵扯。真正需要人工维护的隐式契约**只有一条**：`noise.SCRATCH`（`x20`）必须与 `regalloc` 的所有池不相交。目前靠两边常量定义保证（`SCRATCH=("x20",)`，regalloc 池是 x6/x7、x10–x13），扩 scratch 寄存器时这两处要一起改。除此之外各轴彼此正交、可任意组合，加第 N 条轴不触碰前 N−1 条。
 
-**扩展难度分三档**。第一档，对模型不可见的细节轴（如往噪声池加更多指令）：易，只改 `noise.py`（加 emitter + 进 `_ALU3`/`_ALU2I` 白名单，`is_safe` 自动放行）。第二档，改变 litmus 的语义轴（如新事件属性、新屏障种类）：中，`GenCtx` 加方法 + exporter 加渲染分支 + validator 加校验，三处但都局部。第三档，新事件类：已落地的 AMO/LR/SC 走通了全三角——`model` 加 `amo_op` 字段、exporter 加 AMO/LR/SC 三分支、validator 从 `_UNSUPPORTED_KINDS` 解锁并加宽度/字段/LR·SC 配对规则、families 加 `amo_op`/`aqrl` 两轴与 AMO/LRSC 两个 builder；剩下的 Dependency/Delay 仍需同等改造。每一档都遵循同一纪律：新构造上线前先 herd7 + 汇编器双探针——本轮 AMO/LR/SC 的探针确认 herd7 接受 `amo{op}.{w,d}[.aqrl]`、`lr.{w,d}[.aqrl]`、`sc.{w,d}[.aqrl]` 全组合，且 litmus7 能编 ELF、spike 能跑、oracle 判 SUCCESS。
+**扩展难度分三档**。第一档，对模型不可见的细节轴（如往噪声池加更多指令）：易，只改 `noise.py`（加 emitter + 进 `_ALU3`/`_ALU2I` 白名单，`is_safe` 自动放行）。第二档，改变 litmus 的语义轴（如新事件属性、新屏障种类）：中，`GenCtx` 加方法 + exporter 加渲染分支 + validator 加校验，三处但都局部。第三档，新事件类：AMO/LR/SC 走通了全三角（`model` 加 `amo_op`、exporter 加 AMO/LR/SC 三分支、validator 解锁并加宽度/字段/LR·SC 配对规则、families 加 `amo_op`/`aqrl` 两轴与两个 builder）；Dependency/Delay 同样走通（exporter 加两条 in-window `add` 数据依赖分支、validator 解锁并加依赖种类∈{data}/延迟量∈[1,16] 规则、`_OBSERVING_KINDS` 纳入两类、families 加 `_dependency`/`_delay` 构造器、`delay_amount` 轴与 LBdep 演示族）。至此 `_UNSUPPORTED_KINDS` 为空，所有九种事件类均可建模可编译；地址/控制依赖（需依赖加载/分支机制）仍待实现。每一档都遵循同一纪律：新构造上线前先 herd7 + 汇编器双探针——本轮确认 herd7 接受 `amo{op}.{w,d}[.aqrl]`、`lr/sc.{w,d}[.aqrl]` 全组合与 in-window `add` 数据依赖链，且 litmus7 能编 ELF、spike 能跑、oracle 判 SUCCESS。

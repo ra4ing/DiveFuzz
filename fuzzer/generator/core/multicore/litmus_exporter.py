@@ -97,6 +97,16 @@ def _event_instructions(event: ModeledEvent, address_regs: dict[str, str]) -> li
             f"sc.{_atomic_width_suffix(event.width)}{_aqrl_suffix(event.aq, event.rl)} "
             f"{event.dst},{event.value_reg},0({addr_reg})",
         ]
+    if event.kind is EventKind.DEPENDENCY:
+        # In-window data dependency: link a prior load's value_reg into dst.
+        # Address/control dependencies need a dependent-load / branch mechanism
+        # and are deferred; the validator admits dependency == "data" only.
+        return [f"add {event.dst},{event.value_reg},x0"]
+    if event.kind is EventKind.DELAY:
+        # In-window load-to-use delay: a data-dependency chain of `amount`
+        # adds on dst (adds zero, so value-preserving). Perturbs pipeline
+        # timing without touching memory; herd recomputes the allowed set.
+        return [f"add {event.dst},{event.dst},x0" for _ in range(event.amount)]
     raise ValueError(
         f"Modeled event {event.kind.value} is declared but not yet "
         f"implemented in the exporter (planned for the randomization phase)"

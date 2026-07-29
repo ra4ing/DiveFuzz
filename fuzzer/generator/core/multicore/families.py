@@ -52,7 +52,7 @@ Families span plain Load/Store/Fence/FenceTso (SB, LB, MP, MPTSO, CoRR, WRC,
 IRIW, CoWR, CoRW, CoWW, 2+2W) and AMO/LR/SC (AMO atomicity, LR/SC reservation
 conflict). The coherence/store-store families (CoWR/CoRW/CoWW/2+2W) are
 value-sensitive -- they use :func:`_distinct_values` so competing writes differ;
-the rest are value-insensitive. Dependency/Delay events remain deferred.
+the rest are value-insensitive. Dependency/Delay events are wired as in-window data-dependency constructs (``add`` chains via :func:`_dependency` / :func:`_delay`); address/control dependencies (dependent-load / branch) remain deferred.
 """
 
 import random
@@ -144,6 +144,15 @@ class GenCtx:
             return self.rng.choice(_ACCESS_WIDTHS)
         return _WIDTH
 
+    def delay_amount(self) -> int:
+        """Load-to-use delay chain length. Default 4; when randomizing, a draw
+        in [1, 8]. A semantic-neutral perturbation: the chain is value-preserving
+        (``add x,x,x0``), so the allowed set is unchanged -- it only stresses the
+        DUT's load-to-use / dependency-tracking pipeline."""
+        if self.randomize:
+            return self.rng.randint(1, 8)
+        return 4
+
     def amo_op(self) -> str:
         """The AMO operation. Default ``add``; when randomizing, an independent
         draw from the ops herd7 models. A semantic axis -- it changes the
@@ -212,6 +221,16 @@ def _sc(addr: str, value: int, value_reg: str, dst: str, width: int = 4, aq: boo
         aq=aq,
         rl=rl,
     )
+
+
+def _dependency(dst: str, value_reg: str, dependency: str = "data") -> ModeledEvent:
+    return ModeledEvent(
+        kind=EventKind.DEPENDENCY, dst=dst, value_reg=value_reg, dependency=dependency
+    )
+
+
+def _delay(dst: str, amount: int) -> ModeledEvent:
+    return ModeledEvent(kind=EventKind.DELAY, dst=dst, amount=amount)
 
 
 def _fence_tso() -> ModeledEvent:
@@ -840,6 +859,53 @@ def _build_2plus2w(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
         metadata={"family": "2+2W"},
     )
 
+def _build_lbdep(seed_id: int, ctx: GenCtx, noise_level: str) -> MCProgram:
+    # LB with in-window dependency constructs (2 harts): P0 loads y, runs a
+    # load-to-use DELAY chain on the result, then stores x; P1 loads x, threads
+    # the result through a data DEPENDENCY into the observed register, then
+    # stores y. Both constructs are value-preserving in-window perturbations --
+    # they stress the DUT's load-to-use / dependency-tracking pipeline without
+    # changing the RVWMO allowed set (herd recomputes it on the emitted litmus).
+    alloc = ctx.alloc
+    alloc.addr("x")
+    alloc.addr("y")
+    addr_regs = alloc.addr_regs()
+    vreg = alloc.value()
+    vx = ctx.store_value()
+    vy = ctx.store_value()
+    d0 = alloc.dst(0)
+    d1 = alloc.dst(1)
+    d_dep = alloc.dst(1)
+    amount = ctx.delay_amount()
+    p0 = HartProgram(
+        hart_id=0,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 0),
+        modeled_window=[_load("y", d0), _delay(d0, amount), _store("x", vx, vreg)],
+        epilogue_noise=[],
+        result_capture=[_obs(0, d0)],
+    )
+    p1 = HartProgram(
+        hart_id=1,
+        address_regs=dict(addr_regs),
+        prologue_noise=_prologue(noise_level, ctx, 1),
+        modeled_window=[_load("x", d1), _dependency(d_dep, d1), _store("y", vy, vreg)],
+        epilogue_noise=[],
+        result_capture=[_obs(1, d_dep)],
+    )
+    return MCProgram(
+        seed_id=seed_id,
+        name=f"LBdep-mc{seed_id}",
+        isa=_ISA,
+        hart_count=2,
+        shared_vars=_shared_vars("x", "y"),
+        hart_programs=[p0, p1],
+        observed=[_obs(0, d0), _obs(1, d_dep)],
+        oracle_spec={"family": "LBdep", "allowed_condition": "forall"},
+        noise_profile=noise_level,
+        metadata={"family": "LBdep"},
+    )
+
 # --------------------------------------------------------------------------- #
 # Catalog
 # --------------------------------------------------------------------------- #
@@ -869,6 +935,7 @@ CATALOG: dict[str, FamilySpec] = {
     "CoRW": FamilySpec("CoRW", harts=2, value_sensitive=True, build=_build_corw),
     "CoWW": FamilySpec("CoWW", harts=2, value_sensitive=True, build=_build_coww),
     "2+2W": FamilySpec("2+2W", harts=3, value_sensitive=True, build=_build_2plus2w),
+    "LBdep": FamilySpec("LBdep", harts=2, value_sensitive=False, build=_build_lbdep),
 }
 
 

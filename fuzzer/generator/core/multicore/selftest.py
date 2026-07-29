@@ -228,9 +228,31 @@ def _check_atomic() -> None:
     assert seen_aqrl, "randomize=True never emitted aq/rl bits on AMO across 60 seeds"
 
 
+def _check_dependency_delay() -> None:
+    # Dependency/Delay render as in-window `add` data-dependency constructs and
+    # validate; LBdep exercises both. Deterministic delay amount is 4.
+    det = build_program(0, "LBdep", "none", random.Random(0))
+    validate(det)
+    lit = export_litmus(det)
+    assert lit.count("add x") >= 4, "LBdep deterministic should emit a delay chain"
+    # Randomized LBdep still validates and emits the dependency/delay adds.
+    validate(build_program(0, "LBdep", "none", random.Random(5), randomize=True))
+    # The validator rejects delay amounts outside [1, 16] and unsupported
+    # dependency kinds (addr/ctrl are deferred).
+    from dataclasses import replace
+    bad = replace(det.hart_programs[0].modeled_window[1], amount=0)
+    det.hart_programs[0].modeled_window[1] = bad
+    try:
+        validate(det)
+        raise AssertionError("validator accepted delay amount=0")
+    except ValueError:
+        pass
+
+
 def main() -> None:
     _check_programs()
     _check_atomic()
+    _check_dependency_delay()
     _check_randomized()
     _check_ordering_randomization()
     _check_aliasing()
