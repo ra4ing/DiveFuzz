@@ -50,7 +50,7 @@ python -m generator.main --generate --multicore --seeds 3 \
 
 加一个族，只需在 `families.py` 写一个 `_build_xxx(seed_id, ctx, noise_level)`（用 ctx 要寄存器/值/屏障，用 `_load`/`_store`/`_fence` 构造事件），再在 `CATALOG` 加一条 `FamilySpec`。它自动出现在 `--test-family` 的可选值、selftest、`available_families()` 里，无需改别处。族的 hart 数写在 spec 里。
 
-加一条随机化轴，给 `GenCtx` 加一个方法（返回该轴的随机选择），然后在 `build_program` 里应用它（post-build 最省事，比如直接改 `hp.modeled_window` 或加字段）。族 builder 不用动。轴上线前必须过三道关，缺一不可：用 herd7 探针确认新构造可被建模；用 `riscv64-linux-gnu-gcc` 探针确认能汇编；在 selftest 加一条断言（确定性模式不变、随机模式产生预期变化）。这三步是本轮 aq/rl、mul、same-cacheline 三次踩坑换来的纪律——"herd 接受"绝不等于"能跑"。
+加一条随机化轴，给 `GenCtx` 加一个方法（返回该轴的随机选择），然后在 `build_program` 里应用它（post-build 最省事，比如直接改 `hp.modeled_window` 或加字段）。族 builder 不用动。新增轴前须确认新构造能被 herd7 建模、且能被 `riscv64-linux-gnu-gcc` 汇编（herd7 接受不等于可运行），并在 selftest 加一条断言（确定性模式不变、随机模式产生预期变化）。
 
 ## 回归压力测试
 
