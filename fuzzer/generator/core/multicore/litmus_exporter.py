@@ -183,8 +183,21 @@ def export_litmus(program: MCProgram) -> str:
         lines.append(" " + " | ".join(cells) + " ;")
     lines.append("")
 
-    # exists clause: all observed registers pinned to 0 (litmus7 compatibility
-    # only; the real oracle parses the full States block from herd).
-    cond = " /\\ ".join(f"{o.hart}:{o.reg}=0" for o in program.observed)
+    # exists clause: litmus7 compatibility only -- the real oracle parses the
+    # full States block from herd, not this condition. Register-observing
+    # families pin their observed registers to 0; all-store families (e.g.
+    # 3.2W) have no observed registers, so observe the final memory of each
+    # declared physical shared var (herd reports those in its States block).
+    if program.observed:
+        cond = " /\\ ".join(f"{o.hart}:{o.reg}=0" for o in program.observed)
+    else:
+        seen: set[str] = set()
+        phys_vars: list[str] = []
+        for v in program.shared_vars:
+            p = program.alias_map.get(v.name, v.name)
+            if p not in seen:
+                seen.add(p)
+                phys_vars.append(p)
+        cond = " /\\ ".join(f"{p}=0" for p in phys_vars)
     lines.append(f"exists ({cond})")
     return "\n".join(lines) + "\n"

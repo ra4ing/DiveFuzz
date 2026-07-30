@@ -16,30 +16,56 @@ DiveFuzz-MC 的核心 trick 是**对形式化内存模型做差分**：生成一
 
 ## 数据模型：modeled window 是唯一的语义边界
 
-`MCProgram` 由若干 `HartProgram` 组成，每个 hart 持有一个 `modeled_window`——一串 `ModeledEvent`（Load/Store/Fence/FenceTso），外加前导/夹层/尾部噪声（字符串指令列表）。**整个系统正确性的根基就是这条边界**：herd7 只对 modeled window 求解 allowed 集；window 之外的噪声指令对 oracle 完全不可见。这意味着只要噪声不触碰 window 用到的寄存器与内存，它无论插在哪里都是安全的——这是 L1 interleaving 噪声（见下）能成立的全部理由。
+`MCProgram` 由若干 `HartProgram` 组成，每个 hart 持有一个 `modeled_window`——一串 `ModeledEvent`（Load/Store/Fence/FenceTso/AMO/LR/SC/Dependency/Delay），外加前导/夹层/尾部噪声（字符串指令列表）。**整个系统正确性的根基就是这条边界**：herd7 只对 modeled window 求解 allowed 集；window 之外的噪声指令对 oracle 完全不可见。这意味着只要噪声不触碰 window 用到的寄存器与内存，它无论插在哪里都是安全的——这是 L1 interleaving 噪声（见下）能成立的全部理由。
 
 `observed` 是一组"观测寄存器"——某些 load 的目的寄存器，它们的最终值构成测试的 outcome。allowed 集与观测直方图使用同一套键（`h{hart}.{reg}`，原始寄存器名而非逻辑别名），这样比对时无需发明别名映射。一条规范结果就是 `state.items()` 排序后的元组，可哈希、可 JSON 序列化。
 
 ## 族：固定拓扑，而非参数化模板
 
-当前 catalog 有十五个族，每个是一条**固定的多 hart 拓扑**：
+当前 catalog 有三十七个族，每个是一条**固定的多 hart 拓扑**，覆盖 litmus-tests-riscv 的全部经典原型（装饰变体由随机化轴生成，见下）：
 
-| 族 | hart | 拓扑要点 | 主要压测目标 |
-|---|---|---|---|
-| SB / LB | 2 | 两个核各做一次 store+load / load+store | 访存重排（store/load buffering） |
-| MP | 2 | P0 存两值中间夹 fence，P1 读两值 | release fence 的消息传递保证 |
-| MPTSO | 2 | MP 的 fence 换成 fence.tso | store-store + load-store 序 |
-| CoRR | 2 | 一个核写一次，另一个核对同地址读两次 | 同地址 coherence（禁止 new→old） |
-| WRC | 3 | 写→读→写的因果链跨三核传递 | coherence 因果传递 |
-| IRIW | 4 | 两个写者 + 两个独立读者 | 独立写的可见序一致性 |
-| AMO | 2 | 两个核各做一次原子 read-modify-write，观测返回的旧值 | AMO 原子性（禁止两核都读到初值） |
-| LRSC | 2 | P0 做 LR+SC 同址，P1 并发 store 同址 | LR/SC 预留冲突（介入 store 须令 SC 失败） |
-| CoWR | 2 | P0 写后读同址，P1 并发写不同值 | 同址 coherence（禁止写后读到旧值） |
-| CoRW | 2 | P0 读、写、再读同址，P1 并发写 | 同址 coherence（读-写一致性，3 态） |
-| CoWW | 2 | P0 连写两个不同值同址，P1 读 | 同址 coherence（读者可观测中间写入值） |
-| 2+2W | 3 | P0 写 y→x、P1 写 x→y（无 fence），P2 读两址 | 跨址 store-store 重排可见性（9 态） |
-| LBdep | 2 | LB 拓扑，P0 在 load 后插延迟链、P1 经数据依赖链接观测 | in-window 数据依赖/延迟扰动（load-to-use 流水线压力） |
-| LBadc | 2 | LB 拓扑，P0 经地址依赖、P1 经控制依赖做依赖加载 | 地址生成互锁 / 控制流+访存序探测 |
+**2 线程 / 2 地址的六个"环"（diy 基础拓扑）**
+
+| 族 | 拓扑要点 | 主要压测目标 |
+|---|---|---|
+| MP | P0 存两值中间夹 fence，P1 读两值 | release fence 的消息传递保证 |
+| SB | 两核各做一次 store+load | store buffering 重排 |
+| LB | 两核各做一次 load+store | load buffering 重排 |
+| S | P0 写 x,y；P1 读 y、写 x | store-store / store-forwarding 序 |
+| R | P0 写 x,y；P1 写 y、读 x | load-store 序 |
+| 2+2W | P0 写 y→x、P1 写 x→y，P2 读两址 | 跨址 store-store 重排可见性 |
+
+**同地址 coherence（2 核）**
+
+| 族 | 拓扑要点 |
+|---|---|
+| CoRR / CoRW / CoWR / CoWW | 同址读/写的各种次序组合，禁止违反 coherence 序 |
+
+**多线程因果 / 可见性**
+
+| 族 | hart | 拓扑要点 |
+|---|---|---|
+| WRC / RWC / W | 3 | 写→读→写因果链及其 3 变量推广（x→y→z） |
+| ISA2 | 3 | P0 写 x,y；P1 读 y 写 z；P2 读 z,x —— 最经典的 MP-causality |
+| 3.LB / 3.SB | 3 | LB / SB 的 3 线程环 x→y→z→x |
+| 3.2W | 3 | store-store 3 线程环，**全 store**，观测最终内存（见下） |
+| WWC / WRW / WRR | 3 | Write-Write / Write-Read / Write-Read-Read 因果 |
+| Z6.0–Z6.5 | 3 | *Herding Cats* 的六个多址 coherence 异常 |
+| RDW | 3 | MP + 双地址依赖链（读结果喂下一读的地址） |
+| RSW | 2 | RDW 的单写者 + 单读者版 |
+| IRIW | 4 | 两个写者 + 两个独立读者 |
+| IRWIW / IRRWIW | 4 | IRIW 的尾写扩展 |
+
+**RISC-V 专属（超出通用 litmus）**
+
+| 族 | 拓扑要点 |
+|---|---|
+| MPTSO | MP 的 fence 换成 fence.tso |
+| AMO | 两核各做一次原子 RMW，观测旧值 —— 压原子性 |
+| LRSC | LR+SC 同址 vs 并发 store —— 压预留冲突 |
+| MPAcqRel | MP 的 store 用 `amoswap.w.rl`、load 用 `lr.w.aq` —— 压 aq/rl 序位实现 |
+| LBdep | LB + 延迟链 / 数据依赖 |
+| LBadc | LB + 地址依赖 / 控制依赖 |
 
 hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-hart 拓扑，IRIW 定义上就是 4-hart——"5 hart 的 SB"是另一个测试。因此 `--hart-count N` 是一个**过滤器**：只挑选拓扑要求 N hart 的族，而不是把 N 强加到所有族上。族选择本身是确定性轮换 `test_families[(seed_id - offset) % len]`，保证覆盖可复现。
 
@@ -53,7 +79,7 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 
 **寄存器分配**。`RegAllocator` 按角色（地址/值/观测/scratch）从互不相交的寄存器池里分配。重命名对内存模型是一个双射——herd 在重命名后的 litmus 上重算 allowed 集，runner 观测同样的重命名键。因此这是构造上安全的，且扰动 renamer/ROB/物理寄存器压力。
 
-**存值**。存一个 `[1,127]` 的小立即数。多数 catalog 族是 value-insensitive 的（语义谓词关心可见性/顺序而非数值大小），换值不改 allowed 集拓扑；但相干/序族（CoWR/CoRW/CoWW/2+2W）值敏感——竞争写必须取不同值才有非平凡 allowed 集（同值会塌缩成单态），故其 builder 用 `_distinct_values` 取互异值。这个上界同时满足 `ori` 的 12 位立即数范围和任何访问宽度。
+**存值**。存一个 `[1,127]` 的小立即数。多数族 value-insensitive（语义关心可见性/顺序而非数值）；但**凡有竞争写的族**——相干族（CoWR/CoRW/CoWW）、2+2W、S/R、WWC/WRW/WRR、Z6.0–Z6.5、IRWIW/IRRWIW、3.2W——值敏感：竞争写必须取不同值才有非平凡 allowed 集（同值塌缩成单态），故其 builder 用 `_distinct_values` 取互异值。这个上界同时满足 `ori` 的 12 位立即数范围和任何访问宽度。3.2W 是唯一无 load 的族（全 store），其 outcome 是 x/y/z 的**最终内存值**——herd7 的 `States` 与 litmus7 的 `Histogram` 都以 `[x]=v` 方括号语法报告，`outcome.py` 统一剥方括号后比对。
 
 **fence pred/succ**。屏障的前驱/后继位从 `{r,w,rw}` 独立抽取。这是一条**语义轴**——它确实改变了 allowed 集（比如 `fence r,r` 不强制 store-store 序，被禁止的结果就会变成允许）。但因为 herd 在新 litmus 上重算，比对仍然成立。
 
@@ -65,7 +91,7 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 
 **aq/rl 位**。AMO/LR/SC 事件的 acquire/release 位从 {none,aq,rl,aqrl} 抽取。语义轴——herd 重算。这条轴只在原子族上成立：plain load/store 编码里没有 aq/rl 位（汇编器拒绝 `ld.aq`），其 acquire/release 语义只能用 fence 插入表达。
 
-**L1 噪声（interleaving）**。这是唯一一条"抖动轴"而非"语义轴"。噪声指令只写 scratch 寄存器 `x20`，而 x20 与 modeled window 用到的所有寄存器（地址 x6/x7、值 x12/x13、观测 x10/x11）以及 harness/ABI 保留集都不相交。因此无论噪声插在 prologue、window 事件之间、还是 epilogue，对 window 的访存与观测结果都是零影响——herd 根本看不见它。interleaving（夹在 window 事件之间）是高价值部分：它把 load/store 在时间上拉开，正是压流水线时序、暴露重排敏感 bug 的核心机制。
+**L1 噪声（interleaving）**。这是唯一一条"抖动轴"而非"语义轴"。噪声指令只写 scratch 寄存器 `x20`，而 x20 与 modeled window 用到的所有寄存器（地址 x6/x7/x14、值 x12/x13、观测 x10/x11/x15/x16）以及 harness/ABI 保留集都不相交。因此无论噪声插在 prologue、window 事件之间、还是 epilogue，对 window 的访存与观测结果都是零影响——herd 根本看不见它。interleaving（夹在 window 事件之间）是高价值部分：它把 load/store 在时间上拉开，正是压流水线时序、暴露重排敏感 bug 的核心机制。
 
 ## 正确性的核心：允许集永远以 herd 对"实际发出的 litmus"的求解为准
 
@@ -75,7 +101,7 @@ hart 数是族的**固有属性**，不是全局旋钮。SB 定义上就是 2-ha
 
 ## 已知约束
 
-**aq/rl 位**。plain load/store 的编码没有 aq/rl 位（汇编器拒绝 `ld.aq`），所以 plain 访问的 acquire/release 只能用 fence 插入表达；aq/rl 位只存在于 AMO/LR/SC 指令上，对应随机化轴见上。
+**aq/rl 位**。plain load/store 的编码没有 aq/rl 位（汇编器拒绝 `ld.aq`），所以 plain 访问的 acquire/release 只能用 fence 插入表达；aq/rl 位只存在于 AMO/LR/SC 指令上，对应随机化轴见上。MPAcqRel 族用 `amoswap.w.rl`（release-store）+ `lr.w.aq`（acquire-load）提供了 release-acquire 消息传递的**唯一可执行形式**——压 DUT 的 aq/rl 序位实现正确性。
 
 **same-cacheline 不同字布局**。litmus7 不支持数组声明（`uint64_t a[2]`）和指针算术（`x+1`），所以 `.litmus` 层只能表达 same-word 别名（多个寄存器指向同一变量）；要落到同一缓存行的不同字需要改 harness 的内存布局代码。
 
@@ -94,7 +120,7 @@ spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF
 | 文件 | 职责 |
 |---|---|
 | `model.py` | 数据模型：`MCProgram`/`HartProgram`/`ModeledEvent`/`SharedVar`/`ObservedReg`/`EventKind` |
-| `families.py` | `FamilySpec` catalog、**`GenCtx`（所有轴的生成入口）**、`build_program`（post-build 应用别名/宽度/interleave）、7 族 builder |
+| `families.py` | `FamilySpec` catalog、**`GenCtx`（所有轴的生成入口）**、`build_program`（post-build 应用别名/宽度/interleave）、37 族 builder |
 | `regalloc.py` | `RegAllocator`：按角色（addr/value/dst/scratch）从互斥池分配 |
 | `noise.py` | `NoisePool`：L0/L1 emitter + `sample` + `is_safe` + `SCRATCH` |
 | `litmus_exporter.py` | `MCProgram → .litmus`：宽度表、别名去重 init、interleave 插行 |
@@ -115,10 +141,10 @@ spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF
 | AMO 操作 | `GenCtx.amo_op`，AMO builder 调用 | AMO 分支 `amo{op}.{w,d}` | amo_op∈{add,swap,and,or,xor,min,max}（probe 确认 maxu/minu 被拒） |
 | aq/rl 位 | `GenCtx.aqrl`，原子 builder 调用 | `_aqrl_suffix` 拼到 AMO/LR/SC 助记符 | （无显式；位在编码内，原子族专用，plain Load/Store 不可带） |
 | 延迟链长 | `GenCtx.delay_amount`，LBdep builder 调用 | DELAY 分支 `add dst,dst,x0`×amount | amount∈[1,16] |
-| 依赖（data/addr/ctrl） | `_dependency` 构造器，LBdep/LBadc builder 用 | DEPENDENCY 分支：data=`add`、addr=xor 依赖加载、ctrl=`beq`+无点标签 | dependency∈{data,addr,ctrl}；addr/ctrl 须有 base addr |
+| 依赖（data/addr/ctrl） | `_dependency` 构造器，LBdep/LBadc/RDW/RSW builder 用 | DEPENDENCY 分支：data=`add`、addr=xor 依赖加载、ctrl=`beq`+无点标签 | dependency∈{data,addr,ctrl}；addr/ctrl 须有 base addr |
 
 轴的"应用"有两种风格，扩展时择一：builder 内调用（寄存器/存值/fence——族构造时就问 ctx）；或 `build_program` 里 post-build 应用（别名/宽度/interleave——族 builder 完全无感，改 `ModeledEvent` 或 `HartProgram` 字段即可）。后者更省事，加轴不必动任何族。
 
-**耦合性质**：三角是"机械耦合"——加一条语义轴要在三处各加一点，但每处走的都是 generic 机制（宽度表、is_safe 模式、alias_map 解析），彼此不牵扯。真正需要人工维护的隐式契约**只有一条**：`noise.SCRATCH`（`x20`）必须与 `regalloc` 的所有池不相交。目前靠两边常量定义保证（`SCRATCH=("x20",)`，regalloc 池是 x6/x7、x10–x13），扩 scratch 寄存器时这两处要一起改。除此之外各轴彼此正交、可任意组合，加第 N 条轴不触碰前 N−1 条。
+**耦合性质**：三角是"机械耦合"——加一条语义轴要在三处各加一点，但每处走的都是 generic 机制（宽度表、is_safe 模式、alias_map 解析），彼此不牵扯。真正需要人工维护的隐式契约**只有一条**：`noise.SCRATCH`（`x20`）必须与 `regalloc` 的所有池不相交。目前靠两边常量定义保证（`SCRATCH=("x20",)`，regalloc 池是地址 x6/x7/x14、值 x12/x13、观测 x10/x11/x15/x16），扩 scratch 寄存器时这两处要一起改。除此之外各轴彼此正交、可任意组合，加第 N 条轴不触碰前 N−1 条。
 
 **扩展难度分三档**。第一档，对模型不可见的细节轴（如往噪声池加指令）：易，只改 `noise.py`（加 emitter + 进 `_ALU3`/`_ALU2I` 白名单，`is_safe` 自动放行）。第二档，改变 litmus 语义的轴（新事件属性、新屏障种类）：中，`GenCtx` 加方法 + exporter 加渲染分支 + validator 加校验，三处但都局部。第三档，新事件类：要动 `model`（字段）+ exporter（`_event_instructions` 新分支）+ validator（解锁 + 配对/约束规则）+ families（新 builder）。

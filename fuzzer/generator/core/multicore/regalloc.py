@@ -51,9 +51,16 @@ class RegAllocator:
     # relevant pool *and* confirming the new register is harness-safe (the
     # spike startup.S uses s1=x9 as the slot pointer; gp/tp/sp/ra/zero and the
     # s2-s11/t3-t6 zone are reserved).
-    ADDR_POOL: tuple[str, ...] = ("x6", "x7")
+    # Three addr regs cover the 3-variable cycle families (ISA2, 3.LB/SB, the
+    # Z6.0-Z6.5 series): x->y->z->x. x14 (a4) is caller-saved and outside the
+    # harness RESERVED set; smoke-confirmed against the spike litmus harness.
+    ADDR_POOL: tuple[str, ...] = ("x6", "x7", "x14")
     VALUE_POOL: tuple[str, ...] = ("x12", "x13")
-    DST_POOL: tuple[str, ...] = ("x10", "x11")
+    # Four dst regs cover the address-dependency families (RDW, RSW): their
+    # reader hart chains 2 direct loads + 2 address-dependent loads, needing 4
+    # distinct load destinations on one hart. x15/x16 (a5/a6) are caller-saved
+    # and outside the harness RESERVED set.
+    DST_POOL: tuple[str, ...] = ("x10", "x11", "x15", "x16")
     SCRATCH_POOL: tuple[str, ...] = ("x20",)
 
     # Registers never handed out (ABI + harness-reserved). Documented so the

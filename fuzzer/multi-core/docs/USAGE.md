@@ -28,9 +28,9 @@ python -m generator.main --generate --multicore --seeds 3 \
 
 每个 seed 在 `<out>/seed_<id>/` 下产出五件产物，构成一个**自洽、可独立判定**的单元：`seed.mc.json`（程序模型）、`seed.litmus`（RISCV 源）、`allowed_outcomes.json`（herd 解析的 allowed 集）、`seed.elf`（litmus7 编译的裸机可执行）、`manifest.json`（路径与元数据）。加 `--no-build-executable` 跳过 ELF，只留模型产物。`--test-family` 可重复，省略则默认 SB/LB/MP。
 
-注意 hart 的语义：`--hart-count N` 是**过滤器**，只生成拓扑要求 N hart 的族；省略则各族用自己的 hart 数（SB/LB/MP/MPTSO/CoRR 是 2，WRC 是 3，IRIW 是 4）。所以跑 IRIW 不需要传 `--hart-count 4`，只要 `--test-family IRIW` 或不传 `--hart-count` 即可；若传了 `--hart-count 2` 又点名 IRIW，会立刻报清晰错误而非静默生成错误的程序。
+注意 hart 的语义：`--hart-count N` 是**过滤器**，只生成拓扑要求 N hart 的族；省略则各族用自己的 hart 数（SB/LB/MP/S/R/Co*/AMO/LRSC/RDW 为 2，WRC/RWC/W/ISA2/3.LB/3.SB/3.2W/WWC/WRW/WRR/Z6.* 为 3，IRIW/IRWIW/IRRWIW 为 4）。所以跑 IRIW 不需要传 `--hart-count 4`，只要 `--test-family IRIW` 或不传 `--hart-count` 即可；若传了 `--hart-count 2` 又点名 IRIW，会立刻报清晰错误而非静默生成错误的程序。
 
-可选族覆盖 plain 访问（SB/LB/MP/MPTSO/CoRR/CoWR/CoRW/CoWW/WRC/IRIW/2+2W）、原子（AMO 压原子性、LRSC 压预留冲突）与依赖扰动（LBdep：数据依赖+延迟链；LBadc：地址依赖 xor 依赖加载 + 控制依赖分支跳过）。相干/序族（CoWR/CoRW/CoWW/2+2W）值敏感，builder 自动取互异竞争值；LBdep 的延迟链长在 `--randomize` 下从 [1,8] 抽取。原子族用 AMO/LR/SC 事件，是 `--test-family` 的一等公民；它们额外受两条随机化轴作用（见下）。
+可选族覆盖 litmus-tests-riscv 的全部经典拓扑：plain 访问（MP/SB/LB/S/R/2+2W、相干 CoRR/CoRW/CoWR/CoWW）、多线程因果（WRC/RWC/W/ISA2/3.LB/3.SB/3.2W/WWC/WRW/WRR/Z6.0–Z6.5/IRIW/IRWIW/IRRWIW）、原子（AMO 压原子性、LRSC 压预留冲突、MPAcqRel 用 `amoswap.w.rl`+`lr.w.aq` 压 aq/rl 序位）、依赖扰动（LBdep：数据依赖+延迟链；LBadc：地址依赖 xor 加载 + 控制依赖分支；RDW/RSW：MP + 双地址依赖链，读结果喂下一读的地址）。凡有竞争写的族值敏感，builder 自动取互异竞争值；原子族用 AMO/LR/SC 事件，是 `--test-family` 的一等公民，额外受 AMO 操作与 aq/rl 两条随机化轴作用。3.2W 是唯一全 store 族，观测最终内存。
 
 ## 加速：并行生成与 herd 缓存
 

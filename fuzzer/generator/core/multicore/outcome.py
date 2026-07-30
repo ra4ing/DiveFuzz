@@ -14,9 +14,16 @@
 """Parsing of canonical multicore outcomes from herd7 / litmus7 output.
 
 A canonical outcome is ``tuple(sorted(dict.items()))`` of a ``{key: int}``
-mapping, where keys are raw-register keys like ``h0.x10`` / ``h1.x10`` (raw
-registers are preferred over logical aliases so that no alias mapping has to
-be invented to match litmus/herd output).
+mapping. Two key shapes occur in herd7 ``States`` and litmus7 ``Histogram``
+output alike:
+
+- register keys ``0:x10`` -> canonicalized to ``h0.x10``;
+- final-memory keys, which both tools render bracketed as ``[x]`` -> stripped
+  to the bare location name ``x`` (kept as-is).
+
+All-store families (e.g. 3.2W) have no register observations; their outcome is
+the final memory of the shared locations, so bracket handling is what makes
+them classifiable.
 """
 
 import re
@@ -46,9 +53,14 @@ def canonical_outcome(state: dict[str, int]) -> tuple[tuple[str, int], ...]:
 
 
 def parse_assignment_state(text: str) -> dict[str, int]:
-    r"""Parse ``"0:x10=1 /\ 1:x10=0"`` (or ``;``-separated) into a state dict."""
+    r"""Parse ``"0:x10=1 /\ 1:x10=0"`` (or ``;``-separated) into a state dict.
+
+    Final-memory keys arrive bracketed (``[x]=2``) from both herd7 ``States``
+    and the litmus7 histogram; strip the brackets so they canonicalize to the
+    bare location name and align across the two sources.
+    """
     state: dict[str, int] = {}
-    for m in _ASSIGN_RE.finditer(text):
+    for m in _ASSIGN_RE.finditer(text.replace("[", "").replace("]", "")):
         state[canonical_key(m.group(1))] = int(m.group(2))
     return state
 

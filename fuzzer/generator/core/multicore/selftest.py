@@ -56,6 +56,15 @@ def _check_programs() -> None:
                 assert "lr." in litmus and "sc." in litmus, (
                     f"{family}/{noise}: no LR/SC instructions"
                 )
+            elif family == "MPAcqRel":
+                assert "amoswap.w.rl" in litmus and "lr.w.aq" in litmus, (
+                    f"{family}/{noise}: no release-store/acquire-load"
+                )
+            elif family == "3.2W":
+                # All-store topology: no loads, only stores.
+                assert "sd" in litmus and "ld" not in litmus, (
+                    f"{family}/{noise}: expected store-only (sd, no ld)"
+                )
             else:
                 assert "sd" in litmus and "ld" in litmus, (
                     f"{family}/{noise}: missing sd/ld"

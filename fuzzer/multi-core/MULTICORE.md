@@ -2,7 +2,7 @@
 
 DiveFuzz-MC 是 DiveFuzz 的多核扩展，用**对形式化内存模型差分**的方式 fuzz RISC-V 多核处理器：生成多 hart 内存序测试，用 herd7 求解 RVWMO 允许的结果集，在 DUT 上重复运行，凡出现允许集之外的观测即为候选 bug。后端是 litmus7，oracle 是 herd7。
 
-DiveFuzz-MC 覆盖 15 个测试族（SB/LB/MP/MPTSO/CoRR/CoWR/CoRW/CoWW/WRC/IRIW + AMO/LRSC + 2+2W + LBdep/LBadc，hart 2/3/4）与 9 条可组合的随机化轴（`--randomize` 开寄存器/存值/fence 位/同字别名/宽度混用/AMO 操作/aq·rl 位/延迟链长；`--noise-level L1` 叠加指令间 interleaving 噪声）。确定性模式可复现，随机化模式把单个族展开成大量形态各异的变体。
+DiveFuzz-MC 覆盖 37 个测试族——litmus-tests-riscv 的全部经典拓扑原型（2 线程六环 MP/SB/LB/S/R/2+2W、同址相干 CoRR/CoRW/CoWR/CoWW、多线程因果 WRC/RWC/IRIW/ISA2/3.LB/3.SB/3.2W/WWC/WRW/WRR/Z6.0–Z6.5/RDW/RSW/IRWIW/IRRWIW、原子 AMO/LRSC/MPAcqRel、依赖 LBdep/LBadc，hart 2/3/4）与 9 条可组合的随机化轴（`--randomize` 开寄存器/存值/fence 位/同字别名/宽度混用/AMO 操作/aq·rl 位/延迟链长；`--noise-level L1` 叠加指令间 interleaving 噪声）。确定性模式可复现，随机化模式把单个族展开成大量形态各异的变体。3.2W 是全 store 族，观测最终内存；MPAcqRel 用 `amoswap.w.rl`/`lr.w.aq` 压 aq/rl 序位实现。
 
 ## 去哪读什么
 
