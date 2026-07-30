@@ -20,6 +20,9 @@ the space of emitted constructs, so this script exercises it broadly: for every
 test family it builds many randomized seeds (all axes on, noise levels mixed)
 and pushes each through ``validate -> herd7 accepts -> litmus7 compiles``. A
 sample is then run through the full ``spike + oracle`` closed loop.
+A final Phase C drives the real ``generate_multicore_seeds`` pipeline to guard
+the parallel-generation and herd-cache features (cache transparency, parallel
+== serial determinism, parallel-build ELF safety).
 
 It is a regression gate: exit code is 0 only if every seed validated, was
 accepted by herd7, compiled, and (for the spike sample) classified SUCCESS.
@@ -38,8 +41,10 @@ Tool paths default to the container layout and can be overridden with the
 import argparse
 import os
 import random
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 # Make the parent `fuzzer/` package importable whether run as a file or module.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -52,6 +57,12 @@ from generator.core.multicore.families import (
 from generator.core.multicore.litmus_exporter import export_litmus
 from generator.core.multicore.outcome import parse_herd_states, parse_litmus_histogram
 from generator.core.multicore.validator import validate
+from generator.core.multicore.generate import (
+    MultiCoreGenerationConfig,
+    generate_multicore_seeds,
+)
+from generator.core.multicore.herd_oracle import HerdOracle
+from generator.core.multicore.herd_cache import HerdCache
 from executor.multicore.oracle import classify_outcomes
 
 # Harness dir is <fuzzer>/multi-core/spike-litmus-harness, regardless of CWD.
@@ -169,6 +180,100 @@ def phase_b(compiled: dict, spike_timeout: int) -> int:
     return bad
 
 
+def phase_c(families: list[str], faillog: list[str]) -> int:
+    """Guard the acceleration features via the real generation pipeline.
+
+    Phase A/B exercise ``build_program`` plus raw herd/make; this phase drives
+    ``generate_multicore_seeds`` / ``HerdOracle`` / ``HerdCache`` /
+    ``LitmusExecutableBackend`` directly:
+      C1 cache transparency -- fresh solve == cached miss == cached hit;
+      C2 parallel == serial  -- parallel dispatch yields byte-identical artifacts;
+      C3 parallel build      -- every seed gets a non-empty ELF (guards the unique
+                                per-call build dir that prevents parallel clobbering).
+    """
+    print("\n=== Phase C: pipeline (cache transparency + parallel determinism + build) ===",
+          flush=True)
+    bad = 0
+    base = Path(tempfile.mkdtemp(prefix="dfmc_stressC_"))
+    fam3 = families[:3] or families
+
+    # C1. cache transparency: fresh solve == cached miss == cached hit.
+    pre = bad
+    cache_dir = base / "herd_cache"
+    fresh = HerdOracle(HERD7, cache=None)
+    cached = HerdOracle(HERD7, cache=HerdCache(cache_dir))
+    for fam in fam3:
+        rng = random.Random(424242)
+        prog = build_program(0, fam, "none", rng, randomize=True)
+        validate(prog)
+        lp = base / f"ct_{fam}.litmus"
+        lp.write_text(export_litmus(prog))
+        try:
+            a0 = fresh.allowed_outcomes(str(lp)).allowed
+            a1 = cached.allowed_outcomes(str(lp)).allowed   # miss -> solve -> store
+            a2 = cached.allowed_outcomes(str(lp)).allowed   # hit  -> served
+        except Exception as e:
+            faillog.append(f"[{fam}] C1 herd error: {type(e).__name__}: {e}")
+            bad += 1
+            continue
+        if not (a0 == a1 == a2):
+            faillog.append(f"[{fam}] C1 cache NOT transparent (fresh/cached/hit differ)")
+            bad += 1
+    print(f"C1 cache transparency: {'OK' if bad == pre else 'FAIL'}", flush=True)
+
+    # C2. parallel == serial determinism (herd-only, cache off).
+    pre = bad
+    common = dict(
+        seed_offset=0, test_families=fam3, noise_level="none", herd_path=HERD7,
+        litmus_harness_dir=str(HARNESS), litmus7_path=LITMUS7,
+        litmus7_share=LITMUS7_SHARE, litmus_runs=20, litmus_size=20,
+        build_executable=False, randomize=True, use_herd_cache=False,
+    )
+    n = 6
+    try:
+        bs = generate_multicore_seeds(
+            MultiCoreGenerationConfig(seeds_output=str(base / "serial"), seeds_num=n,
+                                      gen_workers=1, **common))
+        bp = generate_multicore_seeds(
+            MultiCoreGenerationConfig(seeds_output=str(base / "par"), seeds_num=n,
+                                      gen_workers=min(4, n), **common))
+    except Exception as e:
+        faillog.append(f"C2 generate error: {type(e).__name__}: {e}")
+        bad += 1
+        bs = bp = []
+    for s, p in zip(bs, bp):
+        if (Path(s.litmus_path).read_text() != Path(p.litmus_path).read_text()
+                or Path(s.allowed_path).read_text() != Path(p.allowed_path).read_text()):
+            faillog.append(f"[seed {s.seed_id}] C2 artifact differs serial vs parallel")
+            bad += 1
+    print(f"C2 parallel==serial: {'OK' if bad == pre else 'FAIL'}", flush=True)
+
+    # C3. parallel build safety: every seed must yield a non-empty ELF (guards
+    # the per-call unique build dir; without it parallel builds clobber in
+    # build/seed/).
+    pre = bad
+    try:
+        generate_multicore_seeds(
+            MultiCoreGenerationConfig(
+                seeds_output=str(base / "pbuild"), seeds_num=4, gen_workers=3,
+                build_executable=True, randomize=False, use_herd_cache=False,
+                seed_offset=0, test_families=fam3, noise_level="none", herd_path=HERD7,
+                litmus_harness_dir=str(HARNESS), litmus7_path=LITMUS7,
+                litmus7_share=LITMUS7_SHARE, litmus_runs=20, litmus_size=20))
+    except Exception as e:
+        faillog.append(f"C3 parallel build error: {type(e).__name__}: {e}")
+        bad += 1
+    else:
+        for b in sorted((base / "pbuild").glob("seed_*")):
+            elf = b / "seed.elf"
+            if not elf.exists() or elf.stat().st_size == 0:
+                faillog.append(f"[{b.name}] C3 missing/empty ELF after parallel build")
+                bad += 1
+    print(f"C3 parallel build: {'OK' if bad == pre else 'FAIL'}", flush=True)
+
+    shutil.rmtree(base, ignore_errors=True)
+    return bad
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -193,15 +298,17 @@ def main() -> int:
     if not args.no_spike:
         bad = phase_b(a["compiled"], args.spike_timeout)
 
+    c_bad = phase_c(families, faillog)
+
     # Clean the harness build dir (this script's own compile output).
     subprocess.run(["make", "-C", str(HARNESS), "clean"],
                    capture_output=True, text=True, timeout=60)
 
     a_fail = a["herd"] + a["compile"] + a["validate"]
-    if a_fail == 0 and bad == 0:
+    if a_fail == 0 and bad == 0 and c_bad == 0:
         print("\nALL GOOD", flush=True)
         return 0
-    print(f"\nISSUES FOUND (Phase A failures={a_fail}, Phase B non-SUCCESS={bad})", flush=True)
+    print(f"\nISSUES FOUND (Phase A failures={a_fail}, Phase B non-SUCCESS={bad}, Phase C={c_bad})", flush=True)
     return 1
 
 

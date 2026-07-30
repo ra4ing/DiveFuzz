@@ -70,6 +70,9 @@ def main():
             litmus_size=config.litmus_size,
             build_executable=config.build_executable,
             randomize=config.randomize,
+            gen_workers=(config.mc_workers or (os.cpu_count() or 4)),
+            use_herd_cache=config.use_herd_cache,
+            herd_cache_dir=config.herd_cache_dir,
         )
         generate_multicore_seeds(gen_config, logger=logger)
         return

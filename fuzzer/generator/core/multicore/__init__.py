@@ -46,6 +46,7 @@ from .outcome import (
     parse_herd_states,
 )
 from .herd_oracle import HerdOracle, OracleResult
+from .herd_cache import HerdCache
 from .litmus_backend import SeedBundle, LitmusExecutableBackend
 from .generate import (
     MultiCoreGenerationConfig,
@@ -76,6 +77,7 @@ __all__ = [
     "parse_litmus_histogram",
     "parse_herd_states",
     "HerdOracle",
+    "HerdCache",
     "OracleResult",
     "SeedBundle",
     "LitmusExecutableBackend",

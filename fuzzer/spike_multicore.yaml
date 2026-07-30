@@ -29,3 +29,10 @@ seeds:
     noise_level: "none"
     herd_path: /home/ra4ing/.opam/default/bin/herd7
     litmus_harness_dir: /home/ra4ing/workspace/riscv/DiveFuzz/fuzzer/multi-core/spike-litmus-harness
+    # Generation parallelism (worker processes); set to 1 for the serial
+    # baseline used to measure the parallel speedup.
+    gen_workers: 8
+    # herd7 allowed-outcome cache (content-addressed, shared across seeds &
+    # runs); set false to force a fresh herd solve per seed (cache A/B baseline).
+    use_herd_cache: true
+    # herd_cache_dir: ~/.cache/divefuzz/herd   # default; override to relocate

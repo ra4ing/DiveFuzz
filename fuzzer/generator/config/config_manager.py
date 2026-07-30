@@ -118,6 +118,9 @@ class Config:
         self.litmus_runs = int(getattr(args, "litmus_runs", 20))
         self.litmus_size = int(getattr(args, "litmus_size", 20))
         self.build_executable = not bool(getattr(args, "no_build_executable", False))
+        self.mc_workers = getattr(args, "mc_workers", None)
+        self.use_herd_cache = not bool(getattr(args, "no_herd_cache", False))
+        self.herd_cache_dir = getattr(args, "herd_cache_dir", None)
 
 
 def setup_config(args):

@@ -243,6 +243,9 @@ def _mc_to_gen_config(mc) -> MultiCoreGenerationConfig:
         litmus_size=mc.litmus_size,
         build_executable=not mc.gen_only,
         randomize=getattr(mc, "randomize", False),
+        gen_workers=getattr(mc, "gen_workers", os.cpu_count() or 4),
+        use_herd_cache=getattr(mc, "use_herd_cache", True),
+        herd_cache_dir=getattr(mc, "herd_cache_dir", None),
     )
 
 

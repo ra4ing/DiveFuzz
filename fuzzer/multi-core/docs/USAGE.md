@@ -32,6 +32,22 @@ python -m generator.main --generate --multicore --seeds 3 \
 
 可选族覆盖 plain 访问（SB/LB/MP/MPTSO/CoRR/CoWR/CoRW/CoWW/WRC/IRIW/2+2W）、原子（AMO 压原子性、LRSC 压预留冲突）与依赖扰动（LBdep：数据依赖+延迟链；LBadc：地址依赖 xor 依赖加载 + 控制依赖分支跳过）。相干/序族（CoWR/CoRW/CoWW/2+2W）值敏感，builder 自动取互异竞争值；LBdep 的延迟链长在 `--randomize` 下从 [1,8] 抽取。原子族用 AMO/LR/SC 事件，是 `--test-family` 的一等公民；它们额外受两条随机化轴作用（见下）。
 
+## 加速：并行生成与 herd 缓存
+
+生成是 CPU 密集型：每个种子要跑 herd7 求 allowed 集，全流水线还要 litmus7+gcc 编译 ELF。两条独立加速轴都默认开启，且各有开关便于单独度量加速效果：
+
+- **并行生成**：种子分发到多进程池并行处理。`--mc-workers N`（CLI）/ `gen_workers: N`（YAML）控制进程数，默认 CPU 核数；设为 `1` 回退到原始串行路径（A/B 基线）。
+- **herd 缓存**：allowed 集按 `.litmus` 内容寻址缓存（对 `RISCV <name>` 首行归一化，使同族不同 seed_id 的 litmus 共享条目）。默认开启；`--no-herd-cache`（CLI）/ `use_herd_cache: false`（YAML）关闭以强制每种子重新求解；`--herd-cache-dir PATH` 自定义位置（默认 `~/.cache/divefuzz/herd`）。缓存跨种子、跨运行共享，多进程下靠原子写天然安全。
+
+两条轴各自主导一个区间，互不抢戏（性能模式、16 核实测）：
+
+| 场景 | 主导开销 | 主加速项 | 实测 |
+|---|---|---|---|
+| 全流水线（含 ELF 编译），16 种子 | gcc 编译 | **并行** | 串行 12.9s → 并行×16 1.95s ≈ **6.6×** |
+| 仅生成（`--no-build-executable`），60 种子 | herd 求解 | **缓存** | 串行无缓存 1.18s → 缓存热 0.30s ≈ **3.9×** |
+
+经验：缓存去掉 herd 瓶颈后剩余工作太轻，并行 fork 开销无额外收益，故两者一般不叠加；真正的下一个杠杆是 ELF 编译缓存（当前每个种子即使语义同族也各编一次）。开关已就位，可在真实 workload 上随时复测。
+
 ## 随机化：`--randomize` 与 `--noise-level`
 
 这两组开关相互独立、可叠加。`--randomize` 打开八条"细节轴"：寄存器分配、存值、fence pred/succ、同字别名、访问宽度混用（这五条作用于 plain load/store 族），加上 AMO 操作与 aq/rl 位（作用于原子族——plain load/store 编码里没有 aq/rl 位，汇编器会拒绝 `ld.aq`）与延迟链长（作用于 LBdep）。它们都集中在 `GenCtx`，彼此正交、可任意组合。`--noise-level L1` 在此之外叠加 interleaving 噪声（在窗口事件之间插 scratch ALU 指令）；`L0` 是惰性单条噪声，`none` 无噪声。
@@ -55,6 +71,7 @@ python -m generator.main --generate --multicore --seeds 3 \
 ## 回归压力测试
 
 每次改了生成器（加族、加轴、改 exporter/validator）之后，跑 `fuzzer/scripts/multicore_stress.py` 当回归闸门。它的设计直接对着生成器唯一的失败模式——「随机化发出 herd7 不认、或汇编器编不过的构造」——做压力测试：对每个族用大量随机种子（开满所有随机化轴、轮流混入 none/L0/L1 噪声）逐个过「校验 → herd7 接受 → litmus7 编译」，再从每族抽一个跑完整 spike+oracle 闭环。退出码 0 表示全部通过（每个种子都合法、可建模、可编译、且 spike 采样判定 SUCCESS），非 0 即有回归，会上卷每个失败种子的族/seed/噪声层级与报错尾行。
+此外脚本带 **Phase C**：驱动真实的 `generate_multicore_seeds` 流水线守护这两条加速轴——缓存透明性（fresh 求解 == 缓存写入 == 缓存命中）、并行 == 串行（产物字节一致）、并行 build 安全性（每种子产出有效 ELF，守护并行下按种子隔离的 build 目录）。改了并行/缓存相关代码后 Phase C 会自动回归。
 
 在容器里从 `fuzzer/` 目录跑（默认每族 20 个种子 + 每族 1 个 spike 采样，约 10 分钟）：
 

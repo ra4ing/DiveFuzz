@@ -18,8 +18,11 @@ reimplementing the C harness. On any failure the backend raises a
 ``RuntimeError`` whose message starts with ``LITMUS_BACKEND_ERROR:``.
 """
 
+import os
 import shutil
 import subprocess
+import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,15 +62,26 @@ class LitmusExecutableBackend:
         litmus_size: int,
         output_elf: Path,
     ) -> Path:
-        """Compile ``litmus_path`` into ``output_elf`` and return the ELF path."""
+        """Compile ``litmus_path`` into ``output_elf`` and return the ELF path.
+
+        The litmus is staged under a unique filename before invoking the harness
+        Makefile: that Makefile keys its build directory on the litmus filename
+        stem, so without a unique name parallel workers (and even successive
+        serial seeds, which are all named ``seed.litmus``) would all build into
+        the shared ``build/seed/`` and clobber one another's artifacts.
+        """
         litmus_path = Path(litmus_path).resolve()
         output_elf = Path(output_elf)
-        litmus_name = litmus_path.stem
+
+        staged_dir = Path(tempfile.mkdtemp(prefix="dfmc_build_"))
+        litmus_name = f"dfmc_{uuid.uuid4().hex[:12]}"
+        staged_litmus = staged_dir / f"{litmus_name}.litmus"
+        shutil.copy2(litmus_path, staged_litmus)
 
         cmd = [
             "make",
             f"-C{self.harness_dir}",
-            f"LITMUS={litmus_path}",
+            f"LITMUS={staged_litmus}",
             f"AVAIL={hart_count}",
             f"NRUNS={litmus_runs}",
             f"SIZE={litmus_size}",
@@ -78,39 +92,47 @@ class LitmusExecutableBackend:
         if self.litmus7_share:
             cmd.append(f"LITMUS7_SHARE={self.litmus7_share}")
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=600,
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                "LITMUS_BACKEND_ERROR: make compile timed out after 600s"
-            )
-        except OSError as e:
-            raise RuntimeError(
-                f"LITMUS_BACKEND_ERROR: could not run make: {e}"
-            )
-
-        output = proc.stdout or ""
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"LITMUS_BACKEND_ERROR: make compile exited with code "
-                f"{proc.returncode}\n{output}"
-            )
-
         produced_elf = (
             Path(self.harness_dir) / "build" / litmus_name / f"{litmus_name}.elf"
         )
-        if not produced_elf.exists():
-            raise RuntimeError(
-                f"LITMUS_BACKEND_ERROR: expected ELF not produced at "
-                f"{produced_elf}\n{output}"
-            )
+        try:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    "LITMUS_BACKEND_ERROR: make compile timed out after 600s"
+                )
+            except OSError as e:
+                raise RuntimeError(
+                    f"LITMUS_BACKEND_ERROR: could not run make: {e}"
+                )
 
-        output_elf.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(produced_elf, output_elf)
+            output = proc.stdout or ""
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"LITMUS_BACKEND_ERROR: make compile exited with code "
+                    f"{proc.returncode}\n{output}"
+                )
+
+            if not produced_elf.exists():
+                raise RuntimeError(
+                    f"LITMUS_BACKEND_ERROR: expected ELF not produced at "
+                    f"{produced_elf}\n{output}"
+                )
+
+            output_elf.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(produced_elf, output_elf)
+        finally:
+            # Remove the per-call staged litmus and the harness build subdir so
+            # neither accumulates across seeds/runs.
+            shutil.rmtree(staged_dir, ignore_errors=True)
+            shutil.rmtree(
+                Path(self.harness_dir) / "build" / litmus_name, ignore_errors=True
+            )
         return output_elf

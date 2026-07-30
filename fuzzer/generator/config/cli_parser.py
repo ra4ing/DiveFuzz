@@ -255,6 +255,28 @@ def create_parser():
         help="Enable sound-by-construction randomization axes (register "
         "allocation, store values). Off by default to reproduce verified seeds.",
     )
+    parser.add_argument(
+        "--mc-workers",
+        type=int,
+        default=None,
+        help="Multicore generation parallelism (worker processes). Default: CPU "
+        "count. Set to 1 for the original serial path, to measure the parallel "
+        "speedup in isolation.",
+    )
+    parser.add_argument(
+        "--herd-cache-dir",
+        type=str,
+        default=None,
+        help="Directory for the herd7 allowed-outcome cache (content-addressed). "
+        "Default: ~/.cache/divefuzz/herd. Identical litmus is solved once and "
+        "reused across seeds and runs.",
+    )
+    parser.add_argument(
+        "--no-herd-cache",
+        action="store_true",
+        help="Disable the herd7 cache (force a fresh herd solve per seed), to "
+        "measure the cache speedup in isolation.",
+    )
     return parser
 
 

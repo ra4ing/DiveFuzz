@@ -37,11 +37,26 @@ class OracleResult:
 class HerdOracle:
     """Run herd7 to obtain allowed outcomes for a ``.litmus`` file."""
 
-    def __init__(self, herd_path: str):
+    def __init__(self, herd_path: str, cache=None):
         self.herd_path = herd_path
+        # Optional HerdCache: when set, allowed sets are served from / stored to
+        # a content-addressed on-disk cache keyed by the litmus text, so herd7
+        # is only invoked for litmus it has not already solved.
+        self.cache = cache
 
     def allowed_outcomes(self, litmus_path: str) -> OracleResult:
-        """Return the set of allowed outcomes for ``litmus_path``."""
+        """Return the set of allowed outcomes for ``litmus_path``.
+
+        Serves from the cache (if any) when the litmus text is already known;
+        otherwise runs herd7 and stores the result for reuse.
+        """
+        litmus_text = Path(litmus_path).read_text()
+        if self.cache is not None:
+            cached = self.cache.get(litmus_text)
+            if cached is not None:
+                return OracleResult(
+                    allowed=cached, raw_output="(served from herd cache)"
+                )
         try:
             proc = subprocess.run(
                 [self.herd_path, str(litmus_path)],
@@ -76,4 +91,6 @@ class HerdOracle:
             raise RuntimeError(
                 f"HERD_ORACLE_ERROR: failed to parse herd states: {e}\n{output}"
             )
+        if self.cache is not None:
+            self.cache.put(litmus_text, allowed)
         return OracleResult(allowed=allowed, raw_output=output)

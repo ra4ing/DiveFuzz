@@ -144,6 +144,9 @@ class MultiCoreConfig:
     litmus7_path: Optional[str] = None
     litmus7_share: Optional[str] = None
     randomize: bool = False
+    gen_workers: int = field(default_factory=lambda: os.cpu_count() or 4)
+    use_herd_cache: bool = True
+    herd_cache_dir: Optional[str] = None
 
     def __post_init__(self):
         self.seeds_output = os.path.expanduser(self.seeds_output)
