@@ -115,12 +115,16 @@ spike 原生满足；XiangShan `emu` 与 chipyard（Rocket/BOOM）走标准 HTIF
 
 ## 代码架构：每条轴在哪里、改起来难不难
 
-生成器代码全在 `fuzzer/generator/core/multicore/`（11 个 `.py`），执行侧（runner/判定/归档）在 `fuzzer/executor/multicore/`。要判断"某条随机化实现紧不紧耦合、后续好不好改"，关键看清**生成 → 渲染 → 校验**这个三角：每条轴都必须在三处保持一致——`GenCtx` 里生成选择、`litmus_exporter` 里渲染成 `.litmus`、`validator` 里校验合法。这是全系统唯一的耦合模式；三角内的接缝把每条轴的改动面压到了最小。模块分工：
+生成器代码全在 `fuzzer/generator/core/multicore/`（顶层模块 + `families/` 子包），执行侧（runner/判定/归档）在 `fuzzer/executor/multicore/`。要判断"某条随机化实现紧不紧耦合、后续好不好改"，关键看清**生成 → 渲染 → 校验**这个三角：每条轴都必须在三处保持一致——`GenCtx` 里生成选择、`litmus_exporter` 里渲染成 `.litmus`、`validator` 里校验合法。这是全系统唯一的耦合模式；三角内的接缝把每条轴的改动面压到了最小。模块分工：
 
 | 文件 | 职责 |
 |---|---|
 | `model.py` | 数据模型：`MCProgram`/`HartProgram`/`ModeledEvent`/`SharedVar`/`ObservedReg`/`EventKind` |
-| `families.py` | `FamilySpec` catalog、**`GenCtx`（所有轴的生成入口）**、`build_program`（post-build 应用别名/宽度/interleave）、37 族 builder |
+| `families/` 子包 | 族定义按拓扑内聚性分包（公共 API 经 `__init__` 重新导出，下游零改动） |
+| `　genctx.py` | **`GenCtx`（所有轴的生成入口）** + 常量（轴选择域、`_WIDTH`/`_ISA`） |
+| `　events.py` | 事件构造器（`_store`/`_load`/`_amo`/`_lr`/`_sc`/`_dependency`/`_delay`/`_fence_tso`）+ `_obs`/`_shared_vars`/`_prologue`/`_distinct_values` |
+| `　{plain,coherence,multithread,atomics,dependency}.py` | 37 族 builder，按拓扑类别分文件（2线程环 / 相干 / 多线程因果 / 原子 / 依赖） |
+| `　catalog.py` | `FamilySpec` + `CATALOG` + 查询函数 + `build_program`（post-build 应用别名/宽度/interleave） |
 | `regalloc.py` | `RegAllocator`：按角色（addr/value/dst/scratch）从互斥池分配 |
 | `noise.py` | `NoisePool`：L0/L1 emitter + `sample` + `is_safe` + `SCRATCH` |
 | `litmus_exporter.py` | `MCProgram → .litmus`：宽度表、别名去重 init、interleave 插行 |
