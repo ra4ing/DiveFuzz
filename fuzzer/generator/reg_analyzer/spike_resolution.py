@@ -14,11 +14,13 @@
 import os
 import threading
 import sys
+import time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../ref/riscv-isa-sim-adapter/spike_wrapper')))
 from typing import Optional, List
 import spike_wrapper as spike  # pyright: ignore[reportMissingImports]
 from ..asm_template_manager import temp_file_manager, TemplateInstance
 from ..utils.phase_profiler import phase
+from ..utils import candidate_timing
 from .compiler import generate_elf
 from .instruction_parser import InstructionInfo, InstructionParser
 
@@ -70,14 +72,18 @@ class Spike:
             return [instr_info.imm] if instr_info.imm is not None else None
 
         with phase("prefix_materialization"):
+            _t = time.perf_counter()
             # Get template content and concat updated_content from template instance
             entire_content = template.get_complete_template(updated_content_str)
 
             # Write to memory file system
             temp_asm_path = Spike._write_to_memory_file_system(entire_content)
+            candidate_timing.record_extra("t_materialization", time.perf_counter() - _t)
 
         # Compile .S to .elf
+        _t = time.perf_counter()
         elf_file_path = generate_elf(temp_asm_path, '-march=' + template.isa, template.arch_bits)
+        candidate_timing.record_extra("t_compile", time.perf_counter() - _t)
 
         if elf_file_path is None:
             print("Please check riscv-gnu-toolchain.")
@@ -86,16 +92,22 @@ class Spike:
         try:
             """Use the dynamic library packaged by spike and directly input the string into spike_wrapper"""
             with phase("spike_debug_replay"):
+                _t = time.perf_counter()
                 register_values = spike.debug_cmd_str_elf_file(elf_file_path, debug_cmds_str, template.isa)
+                candidate_timing.record_extra("t_replay", time.perf_counter() - _t)
         except Exception as e:
             print(f"Spike wrapper error: {e}")
             return None
 
         with phase("output_cleanup"):
+            _t = time.perf_counter()
             temp_file_manager.cleanup_all_temp_files()
+            candidate_timing.record_extra("t_cleanup", time.perf_counter() - _t)
 
         with phase("spike_debug_replay"):
+            _t = time.perf_counter()
             register_values = Spike._convert_hex_values(register_values)
+            candidate_timing.record_extra("t_replay_convert", time.perf_counter() - _t)
         if register_values is None:
             return None
 

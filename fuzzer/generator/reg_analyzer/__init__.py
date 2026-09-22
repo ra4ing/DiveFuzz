@@ -17,6 +17,7 @@ from typing import Tuple, Optional
 from ..bug_filter import bug_filter
 from ..utils import list2str
 from ..utils.phase_profiler import phase
+from ..utils import candidate_timing
 from ..asm_template_manager import TemplateInstance
 from .instruction_parser import InstructionParser
 from .spike_resolution import Spike
@@ -41,12 +42,38 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
         template: Template instance for wrapping content
     Returns:
         result_code: 1 if new unique value found, 0 if duplicate, 3 if error
+
+    When per-candidate timing is enabled (DIVEFUZZ_CANDIDATE_TIMING_DIR),
+    each attempt emits one record.  ``position`` is the accepted prefix
+    length; the replay-based evaluation components (materialization,
+    compile, replay, cleanup) are attached by ``Spike.get_registers_values``
+    via ``candidate_timing.record_extra``.
     """
+    candidate_timing.note_position(len(updated_content))
+    timer = candidate_timing.start_attempt()
+
+    def _finish(result_code: int, stage: Optional[str]) -> int:
+        candidate_timing.finish_attempt(
+            timer,
+            accepted=result_code == 1,
+            rejected_stage=stage,
+            op_name=op_name,
+            prefix_len=len(updated_content),
+            n_source_values=n_source_values,
+        )
+        return result_code
+
+    op_name = instr.split()[0] if instr.split() else None
+    n_source_values = None
+
     with phase("prefix_materialization"):
         # parse instruction
         instr_processed, instr_info = InstructionParser.parse_instruction(instr)
+        if timer:
+            timer.mark("t_parse")
         if instr_info is None: # Unsupported instruction type
-            return 3
+            return _finish(3, "parse")
+        op_name = instr_info.op_name
 
         # first time to look up RSx value
         instr_payload_str = list2str(updated_content)
@@ -55,17 +82,24 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
                 instr_payload_str += '\n' + instr_processed + '\n' + f'{label}:' + '\n  li t5,0x2727272727\n'
             else:
                 instr_payload_str += '\n' + instr_processed + '\n  li t5,0x2727272727\n'
+    if timer:
+        timer.mark("t_payload")
 
 
     # Get register values by spike
     register_values = Spike.get_registers_values(instr_info, instr_payload_str, template)
+    if timer:
+        timer.mark("t_eval")
     if register_values is None:
-        return 3
+        return _finish(3, "eval")
+    n_source_values = len(register_values)
 
     bug_name = bug_filter.filter_known_bug(instr_info.op_name, register_values)
+    if timer:
+        timer.mark("t_bug_filter")
     if bug_name is not None:
         print(bug_name)
-        return 3
+        return _finish(3, "bug_filter")
 
     # Calculates the XOR value and returns it
 
@@ -81,13 +115,19 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
                 existing_values = set(file.read().splitlines())
                 if str(xor_stderr) not in existing_values:
                     file.write(f"{xor_stderr}\n")
-                    return 1
+                    if timer:
+                        timer.mark("t_xor_io")
+                    return _finish(1, None)
         except FileNotFoundError:
             with open(xor_file_path, "w") as file:
                 file.write(f"{xor_stderr}\n")
-            return 1
+            if timer:
+                timer.mark("t_xor_io")
+            return _finish(1, None)
 
-    return 0
+    if timer:
+        timer.mark("t_xor_io")
+    return _finish(0, "dedup")
 
 def temp_asm_to_debug(updated_content: Tuple[str], instr: str, template: TemplateInstance,
                       is_first: bool = False, xor_cache_dir: Optional[str] = None):

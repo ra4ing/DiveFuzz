@@ -31,6 +31,7 @@ from ...instr_generator import (
     reg_range
 )
 from ...reg_analyzer import temp_asm_to_debug_generate
+from ...utils import candidate_timing
 from ...utils import list2str
 from ...utils.phase_profiler import phase, reset_phase_profile, write_phase_profile
 from ...coverage.difuzz_si_exporter import export_difuzz_si as write_difuzz_si
@@ -62,10 +63,15 @@ def generate_instructions(instr_number: int,
         out_dir: Output directory for seed files (default: cwd/out-seeds)
     """
     reset_phase_profile("divefuzztest", seed_times, instr_number)
+    candidate_timing.configure("divefuzztest", seed_times, instr_number)
+    setup_timer = candidate_timing.start_setup()
     # Create fresh template instance for this seed with random type and values
     # This ensures each seed gets independent random content (CSR, register init, etc.)
     with phase("setup"):
         template = create_template_instance(arch, template_type)
+    if setup_timer:
+        setup_timer.mark("t_template")
+    candidate_timing.finish_setup(setup_timer, phase="template")
 
     # Calculate the total of explicitly assigned probabilities
     total_specified_prob = sum(allowed_ext.special_probabilities.values())
@@ -428,6 +434,9 @@ def generate_instructions(instr_number: int,
             )
         write_instructions_to_file(new_filename, list2str(entire_instrs), template)
     write_phase_profile()
+    candidate_timing.flush()
+
+
 
     return resolve_duplicates, resolve_duplicates_fail
 
