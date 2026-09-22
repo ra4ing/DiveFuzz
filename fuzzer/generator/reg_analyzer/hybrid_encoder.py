@@ -22,6 +22,7 @@ Supports pseudo-instructions that expand to multiple machine instructions:
 - etc.
 """
 
+import os
 import re
 from typing import List, Tuple, Union, Optional
 from dataclasses import dataclass
@@ -156,6 +157,19 @@ class HybridEncoder:
             RuntimeError: If both encoder and compiler fail
         """
         self.stats['total_calls'] += 1
+        # Ablation switch: force every candidate through the external toolchain
+        # path (as + objcopy) instead of the in-process table encoder.
+        # Enabled via DIVEFUZZ_FORCE_COMPILER_ENCODING for the
+        # executable-reconstruction ablation run.  The default march covers
+        # fewer extensions than the table encoder, so DIVEFUZZ_ABLATION_MARCH
+        # can widen it (e.g. add _zbkb) to keep the encoded instruction set
+        # identical between ablation and full runs.
+        if os.environ.get("DIVEFUZZ_FORCE_COMPILER_ENCODING"):
+            self.stats['fallback_used'] += 1
+            march = os.environ.get("DIVEFUZZ_ABLATION_MARCH") or None
+            result = self.compiler.compile_instruction_sequence(instruction, march=march)
+            return result
+
 
         # Step 1: Try fast encoder (only works for single real instructions)
         encoder_error = None
