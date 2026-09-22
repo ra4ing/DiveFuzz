@@ -68,6 +68,7 @@ try:
         PostExecutionState,
     )
     from ..bug_filter.registry import FilterRegistry
+    from ..utils import candidate_timing
 except ImportError:
     import sys
     from pathlib import Path
@@ -82,6 +83,7 @@ except ImportError:
     from stateful_xor_cache import StatefulXORCache, InstructionContext
     from bug_filter.context import FilterContext, PreExecutionState, PostExecutionState
     from bug_filter.registry import FilterRegistry
+    from utils import candidate_timing
 
 FPR_OFFSET = 32
 
@@ -257,14 +259,50 @@ class InstructionValidator:
         9. Check post-execution precision filters
         10. Log and confirm
 
+        When per-candidate timing is enabled (DIVEFUZZ_CANDIDATE_TIMING_DIR),
+        each attempt emits one record with per-segment wall times.  Segment
+        semantics follow the paper terminology: ``t_encode`` is the in-process
+        encoding of the candidate, ``t_state_query`` reads the persistent-ISS
+        source operands, and ``t_checkpoint``/``t_execute``/``t_rollback``
+        cover reversible candidate execution.  Policy segments (dedup check,
+        filters, logging) are recorded for attribution only.
+
         Args:
             instruction: Assembly instruction string
 
         Returns:
             Tuple of (is_valid, actual_bytes)
         """
+        timer = candidate_timing.start_attempt()
+        try:
+            return self._validate_instruction_timed(instruction, timer)
+        except Exception:
+            candidate_timing.finish_attempt(
+                timer,
+                accepted=False,
+                rejected_stage="exception_early",
+                opcode=None,
+                n_source_regs=0,
+                instr_bytes=0,
+            )
+            raise
+
+    def _validate_instruction_timed(
+        self, instruction: str, timer
+    ) -> Tuple[bool, int]:
+        """validate_instruction body with optional per-segment timing marks."""
         instruction_seq = self.encoder.encode_sequence(instruction)
+        if timer:
+            timer.mark("t_encode")
         if not instruction_seq:
+            candidate_timing.finish_attempt(
+                timer,
+                accepted=False,
+                rejected_stage="encode",
+                opcode=None,
+                n_source_regs=0,
+                instr_bytes=0,
+            )
             return False, 0
 
         attribution_instruction = self._select_attribution_instruction(instruction)
@@ -273,15 +311,29 @@ class InstructionValidator:
             attribution_instruction
         )
         actual_bytes = sum(size for _, size in instruction_seq)
+        if timer:
+            timer.mark("t_parse")
 
         source_values = [self._read_register(r) for r in source_regs]
         if immediate is not None:
             source_values.append(immediate)
+        if timer:
+            timer.mark("t_state_query")
 
         xor_value, is_unique, cache_value = self._check_xor_unique(
             opcode, source_values
         )
+        if timer:
+            timer.mark("t_dedup_check")
         if not is_unique:
+            candidate_timing.finish_attempt(
+                timer,
+                accepted=False,
+                rejected_stage="dedup",
+                opcode=opcode,
+                n_source_regs=len(source_regs),
+                instr_bytes=actual_bytes,
+            )
             return False, 0
 
         s_pre = None
@@ -295,8 +347,20 @@ class InstructionValidator:
             ctx = self._build_filter_context(attribution_instruction, opcode, operands, s_pre)
 
             pre_reason = self.precision_registry.check_pre_execution(ctx)
+            if timer:
+                timer.mark("t_pre_filter")
             if pre_reason:
+                candidate_timing.finish_attempt(
+                    timer,
+                    accepted=False,
+                    rejected_stage="pre_filter",
+                    opcode=opcode,
+                    n_source_regs=len(source_regs),
+                    instr_bytes=actual_bytes,
+                )
                 return False, 0
+        elif timer:
+            timer.mark("t_pre_filter")
 
         try:
             if self._debug_logger_enabled and self._debug_logger:
@@ -305,7 +369,12 @@ class InstructionValidator:
             machine_codes = [mc for mc, _ in instruction_seq]
             sizes = [sz for _, sz in instruction_seq]
             self.spike_session.set_checkpoint()
+            if timer:
+                timer.mark("t_checkpoint")
+
             self.spike_session.execute_sequence(machine_codes, sizes)
+            if timer:
+                timer.mark("t_execute")
 
             if self.precision_registry and s_pre:
                 s_post = self._build_post_execution_state()
@@ -319,13 +388,39 @@ class InstructionValidator:
                 )
 
                 post_reason = self.precision_registry.check_post_execution(ctx)
+                if timer:
+                    timer.mark("t_post_filter")
                 if post_reason:
                     self.spike_session.restore_checkpoint_and_reset()
+                    if timer:
+                        timer.mark("t_rollback")
+                    candidate_timing.finish_attempt(
+                        timer,
+                        accepted=False,
+                        rejected_stage="post_filter",
+                        opcode=opcode,
+                        n_source_regs=len(source_regs),
+                        instr_bytes=actual_bytes,
+                    )
                     return False, 0
+            elif timer:
+                timer.mark("t_post_filter")
 
             committed = self._commit_xor_unique(opcode, cache_value)
+            if timer:
+                timer.mark("t_commit_xor")
             if not committed:
                 self.spike_session.restore_checkpoint_and_reset()
+                if timer:
+                    timer.mark("t_rollback")
+                candidate_timing.finish_attempt(
+                    timer,
+                    accepted=False,
+                    rejected_stage="xor_commit",
+                    opcode=opcode,
+                    n_source_regs=len(source_regs),
+                    instr_bytes=actual_bytes,
+                )
                 return False, 0
 
             try:
@@ -341,16 +436,41 @@ class InstructionValidator:
                 )
             except Exception as log_error:
                 self._log_exception(instruction, log_error)
+            if timer:
+                timer.mark("t_log")
 
             self.spike_session.confirm_instruction()
+            if timer:
+                timer.mark("t_confirm")
+            candidate_timing.finish_attempt(
+                timer,
+                accepted=True,
+                rejected_stage=None,
+                opcode=opcode,
+                n_source_regs=len(source_regs),
+                instr_bytes=actual_bytes,
+            )
             return True, actual_bytes
 
         except Exception as e:
             self._log_exception(instruction, e)
+            rolled_back = False
             try:
                 self.spike_session.restore_checkpoint_and_reset()
+                rolled_back = True
             except Exception as restore_error:
                 self._log_exception(instruction, restore_error)
+            if timer:
+                timer.mark("t_rollback")
+            candidate_timing.finish_attempt(
+                timer,
+                accepted=False,
+                rejected_stage="exception",
+                opcode=opcode,
+                n_source_regs=len(source_regs),
+                instr_bytes=actual_bytes,
+                rolled_back=rolled_back,
+            )
             return False, 0
 
     def _log_instruction(

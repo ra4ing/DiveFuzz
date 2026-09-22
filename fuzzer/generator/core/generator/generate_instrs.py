@@ -41,6 +41,7 @@ from ...reg_analyzer.spike_session import SpikeSession, SPIKE_ENGINE_AVAILABLE
 from ...reg_analyzer.instruction_validator import InstructionValidator
 from ...reg_analyzer.hybrid_encoder import HybridEncoder
 from ...utils import list2str
+from ...utils import candidate_timing
 from .register_history import RegisterHistory
 from ...instr_generator.label_manager import LabelManager
 from ...config.config_manager import MAX_MUTATE_TIME
@@ -347,9 +348,16 @@ def generate_instructions(
         use_stateful_cache: Use StatefulXORCache when True, plain XORCache when False
     """
 
+    # Per-candidate timing metadata (no-op unless DIVEFUZZ_CANDIDATE_TIMING_DIR set)
+    candidate_timing.configure("revfuzz", seed_times, instr_number)
+    setup_timer = candidate_timing.start_setup()
+
     # Create fresh template instance for this seed with random type and values
     # This ensures each seed gets independent random content (MSTATUS, register init, etc.)
     template = create_template_instance(arch, template_type)
+    if setup_timer:
+        setup_timer.mark("t_template")
+    candidate_timing.finish_setup(setup_timer, phase="template")
     spike_session = None
     xor_cache = None
 
@@ -363,12 +371,16 @@ def generate_instructions(
     try:
         # Initialize Spike session for eliminate mode (checkpoint-based validation)
         validator = None
+        frame_timer = None
         if eliminate_enable and SPIKE_ENGINE_AVAILABLE:
+            frame_timer = candidate_timing.start_setup()
             try:
                 # Generate NOP ELF template
                 # Note: generate_nop_elf internally adds NOP_REDUNDANCY extra NOPs
                 elf_path = f"/dev/shm/template_{seed_times}_{instr_number}.elf"
                 elf_path = generate_nop_elf(template, instr_number, elf_path)
+                if frame_timer:
+                    frame_timer.mark("t_nop_elf")
 
                 # Create SpikeSession with total instruction capacity (including redundancy)
                 # This ensures spike_engine can handle pseudo-instruction expansion
@@ -376,6 +388,8 @@ def generate_instructions(
                     elf_path, template.isa, instr_number + NOP_REDUNDANCY
                 )
                 initialized = spike_session.initialize()
+                if frame_timer:
+                    frame_timer.mark("t_spike_init")
                 if initialized:
                     # Attach to shared XOR cache from Master process
                     if xor_cache_state is not None:
@@ -400,7 +414,8 @@ def generate_instructions(
                         precision_registry=precision_registry,
                         bug_filter_enable=bug_filter_enable,
                     )
-
+                    if frame_timer:
+                        frame_timer.mark("t_validator_init")
                     # Enable detailed debug output if debug_config is provided
                     if debug_config and debug_config.get("enabled", False):
                         debug_output_dir = debug_config.get("output_dir", out_dir)
@@ -460,6 +475,8 @@ def generate_instructions(
                 encoder = HybridEncoder(quiet=True)
             except Exception:
                 encoder = None
+
+        candidate_timing.finish_setup(frame_timer, phase="iss_frame")
 
         # Calculate the total of explicitly assigned probabilities
         total_specified_prob = sum(allowed_ext.special_probabilities.values())
@@ -535,6 +552,8 @@ def generate_instructions(
             and actual_bytes < max_bytes
             and total_instr_retry < MAX_TOTAL_INSTR_RETRY
         ):
+            # Track the candidate slot being filled for per-attempt timing
+            candidate_timing.note_position(logical_instr_index)
             is_c_extension = False
 
             # Unified extension selection based on configuration and probabilities
@@ -1141,7 +1160,8 @@ def generate_instructions(
             except Exception:
                 pass
 
-        # Clean up temporary files in /dev/shm
+        # Flush per-candidate timing records for this worker
+        candidate_timing.flush()
         temp_file_manager.cleanup_all_temp_files()
 
 
