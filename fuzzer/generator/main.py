@@ -46,7 +46,13 @@ def main():
             config.is_rv32,
             config.max_workers,
             config.arch,
-            config.template_type
+            config.template_type,
+            out_dir=str(config.out_dir),
+            xor_cache_dir=config.xor_cache_dir,
+            xor_cache_mode=config.xor_cache_mode,
+            export_difuzz_si=config.export_difuzz_si,
+            difuzz_si_dir=str(config.difuzz_si_dir) if config.difuzz_si_dir is not None else None,
+            difuzz_si_template=config.difuzz_si_template,
         )
 
     # Whether to enable out-of-order mutation, considering previously unseen extension instructions
@@ -59,14 +65,18 @@ def main():
             config.exclude_extensions,
             config.eliminate_enable,
             config.arch,
-            config.template_type
+            config.template_type,
+            xor_cache_dir=config.xor_cache_dir,
+            xor_cache_mode=config.xor_cache_mode
         )
 
 
 
 def test_main():
-
+    start_time = time.time()
     main()
+    end_time = time.time()
+    print("# Execution time: %.2f seconds" % (end_time - start_time))
 
 
 if __name__ == "__main__":

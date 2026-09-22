@@ -98,8 +98,34 @@ SPECIAL_PROB_GENERAL = {
     # 'RV_V': 0.3
     # 'ILL':0.8
 }
-ALLOWED_EXT_BASE = {
+SPECIAL_PROB_BASE = {
 
+}
+
+# ========= 5) NutShell (RV64IMAC) =========
+SPECIAL_PROB_NUTSHELL = {
+    # Use uniform distribution by default
+}
+
+SPECIAL_PROB_NUTSHELL_RV32 = {
+    # Use uniform distribution by default
+}
+
+SPECIAL_PROB_BOOM = {
+    
+}
+
+SPECIAL_PROB_XIANGSHAN = {
+
+}
+
+# ========= 8) Rocket (RV64GC) =========
+SPECIAL_PROB_ROCKET = {
+    # Use uniform distribution by default
+}
+
+SPECIAL_PROB_ROCKET_RV32 = {
+    # Use uniform distribution by default
 }
 
 SPECIAL_PROB_PROFILES = {
@@ -107,5 +133,11 @@ SPECIAL_PROB_PROFILES = {
     "cva6_cascade": SPECIAL_PROB_CVA6_CASCADE,
     "rv32": SPECIAL_PROB_RV32,
     "general": SPECIAL_PROB_GENERAL,
-    "base": ALLOWED_EXT_BASE,
+    "base": SPECIAL_PROB_BASE,
+    "nutshell": SPECIAL_PROB_NUTSHELL,
+    "nutshell_rv32": SPECIAL_PROB_NUTSHELL_RV32,
+    'boom': SPECIAL_PROB_BOOM,
+    'xiangshan': SPECIAL_PROB_XIANGSHAN,
+    'rocket': SPECIAL_PROB_ROCKET,
+    'rocket_rv32': SPECIAL_PROB_ROCKET_RV32,
 }

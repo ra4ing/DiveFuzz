@@ -301,3 +301,37 @@ def format_duration(start_time: datetime, end_time: datetime) -> str:
             duration_text = f"{hours} h {remaining_minutes} min {remaining_seconds}.{milliseconds:03d} s"
     
     return duration_text
+def generate_failure_details(total_results: list, logger):
+    """
+    Generate a detailed list of non-SUCCESS seeds for easy post-run analysis.
+    """
+    non_success = [r for r in total_results if r.result_type != ResultType.SUCCESS]
+    if not non_success:
+        return
+
+    failures = [r for r in non_success if r.result_type == ResultType.FAILURE]
+    timeouts = [r for r in non_success if r.result_type == ResultType.TIMEOUT]
+    errors  = [r for r in non_success if r.result_type == ResultType.ERROR]
+
+    content_lines = ["", TermColor.header("DETAILED FAILURE REPORT"), ""]
+
+    def _add_section(title, icon, items):
+        if not items:
+            return
+        content_lines.append(f"{icon} {title} ({len(items)}):")
+        for r in items:
+            content_lines.append(f"  {r.seed_name}")
+            if r.summary:
+                content_lines.append(f"    {r.summary}")
+            content_lines.append(f"    Log: {r.log_path}")
+        content_lines.append("")
+
+    _add_section("Mismatches (non-zero exit)", TermColor.error("✗"), failures)
+    _add_section("Timeouts",                  TermColor.warning("⚠"), timeouts)
+    _add_section("Errors",                    TermColor.error("✗"), errors)
+
+    report_lines = generate_report_block(content_lines, TermColor.error)
+    report = "\n".join(report_lines)
+    logger.info("")
+    logger.info('\n' + report)
+    logger.info("")

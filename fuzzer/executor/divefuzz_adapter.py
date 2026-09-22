@@ -94,7 +94,9 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
             is_rv32=seed_config.divefuzz.is_rv32,
             max_workers=seed_config.divefuzz.threads,
             arch=_divefuzz_config.arch,
-            template_type=seed_config.divefuzz.template_type
+            template_type='xiangshan',
+            out_dir=str(_divefuzz_config.out_dir),
+            xor_cache_dir=_divefuzz_config.xor_cache_dir,
         )
 
     elif seed_config.divefuzz.mode == "mutate":
@@ -106,7 +108,8 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
             exclude_extensions=seed_config.divefuzz.exclude_extension if seed_config.divefuzz.exclude_extension else [],
             eliminate_enable=seed_config.divefuzz.dive_enable,
             arch=_divefuzz_config.arch,
-            template_type=seed_config.divefuzz.template_type
+            template_type=seed_config.divefuzz.template_type,
+            xor_cache_dir=_divefuzz_config.xor_cache_dir,
         )
     else:
         raise ValueError(f"Unknown mode: {seed_config.divefuzz.mode}")
@@ -117,8 +120,8 @@ def run_divefuzz(seed_config: GeneratedSeedConfig, seed_config_logger) -> list:
 
 def process_divefuzz_asm(seed_config: GeneratedSeedConfig, seed_config_logger):
 
-    # Generator outputs to cwd/out-seeds by default
-    generator_output_dir = Path.cwd() / 'out-seeds'
+    # Use the configured output directory (respects --out-dir / seeds_output)
+    generator_output_dir = _divefuzz_config.out_dir if _divefuzz_config is not None else Path.cwd() / 'out-seeds'
 
     # convert img/elf (gcc compilation of final .S files)
     seed_config_logger.info("Converting assembly to elf files...")

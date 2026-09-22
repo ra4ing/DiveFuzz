@@ -12,13 +12,13 @@
 # See the Mulan PSL v2 for more details.
 
 import os
-import time
 import threading
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../ref/riscv-isa-sim-adapter/spike_wrapper')))
 from typing import Optional, List
-import spike_wrapper as spike
+import spike_wrapper as spike  # pyright: ignore[reportMissingImports]
 from ..asm_template_manager import temp_file_manager, TemplateInstance
+from ..utils.phase_profiler import phase
 from .compiler import generate_elf
 from .instruction_parser import InstructionInfo, InstructionParser
 
@@ -55,70 +55,47 @@ class Spike:
 
     @staticmethod
     def get_registers_values(instr_info: InstructionInfo, updated_content_str: str, template: TemplateInstance,
-                             time_accumulator: dict = None) -> Optional[List[int]]:
+                              ) -> Optional[List[int]]:
         """
         Use Spike to simulate a RISC-V program and extract source register values.
 
         :param instr_info: Parsed instruction information
         :param updated_content_str: Assembly content to simulate
         :param template: Template instance to wrap the content
-        :param time_accumulator: Optional dict with 'compile' and 'spike' keys to accumulate timing
-                                 - compile = template building + temp file + generate_elf + cleanup
-                                 - spike = debug command generation + spike execution
         :return: List of register values (and immediate if applicable)
         """
 
-        # === SPIKE TIME: Generate debug commands ===
-        spike_start = time.perf_counter() if time_accumulator else None
         debug_cmds_str = Spike._generate_debug_commands(instr_info)
         if debug_cmds_str is None: # no register to read
-            if time_accumulator:
-                time_accumulator['spike'] += time.perf_counter() - spike_start
             return [instr_info.imm] if instr_info.imm is not None else None
-        if time_accumulator:
-            time_accumulator['spike'] += time.perf_counter() - spike_start
 
-        # === COMPILE TIME: Build template, create temp file, compile ===
-        compile_start = time.perf_counter() if time_accumulator else None
+        with phase("prefix_materialization"):
+            # Get template content and concat updated_content from template instance
+            entire_content = template.get_complete_template(updated_content_str)
 
-        # Get template content and concat updated_content from template instance
-        entire_content = template.get_complete_template(updated_content_str)
-
-        # Write to memory file system
-        temp_asm_path = Spike._write_to_memory_file_system(entire_content)
+            # Write to memory file system
+            temp_asm_path = Spike._write_to_memory_file_system(entire_content)
 
         # Compile .S to .elf
         elf_file_path = generate_elf(temp_asm_path, '-march=' + template.isa, template.arch_bits)
 
         if elf_file_path is None:
-            if time_accumulator:
-                time_accumulator['compile'] += time.perf_counter() - compile_start
             print("Please check riscv-gnu-toolchain.")
             return None
 
-        if time_accumulator:
-            time_accumulator['compile'] += time.perf_counter() - compile_start
-
-        # === SPIKE TIME: Execute spike ===
-        spike_start = time.perf_counter() if time_accumulator else None
         try:
             """Use the dynamic library packaged by spike and directly input the string into spike_wrapper"""
-            register_values = spike.debug_cmd_str_elf_file(elf_file_path, debug_cmds_str, template.isa)
+            with phase("spike_debug_replay"):
+                register_values = spike.debug_cmd_str_elf_file(elf_file_path, debug_cmds_str, template.isa)
         except Exception as e:
-            if time_accumulator:
-                time_accumulator['spike'] += time.perf_counter() - spike_start
             print(f"Spike wrapper error: {e}")
             return None
-        if time_accumulator:
-            time_accumulator['spike'] += time.perf_counter() - spike_start
 
-        # === COMPILE TIME: Cleanup temp files ===
-        compile_start = time.perf_counter() if time_accumulator else None
-        temp_file_manager.cleanup_all_temp_files()
-        if time_accumulator:
-            time_accumulator['compile'] += time.perf_counter() - compile_start
+        with phase("output_cleanup"):
+            temp_file_manager.cleanup_all_temp_files()
 
-        register_values = Spike._convert_hex_values(register_values)
+        with phase("spike_debug_replay"):
+            register_values = Spike._convert_hex_values(register_values)
         if register_values is None:
             return None
 

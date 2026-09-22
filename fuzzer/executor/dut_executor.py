@@ -21,7 +21,7 @@ import glob
 from config.logger_config import create_test_logger
 from config.dut_config import Config, DUTTarget, DirSeedConfig, GeneratedSeedConfig, SeedConfigBase
 from executor.divefuzz_adapter import setup_divefuzz, run_divefuzz
-from utils.results_reporter import TestResult, ResultType, format_duration, generate_result_report, generate_summary_report
+from utils.results_reporter import TestResult, ResultType, format_duration, generate_result_report, generate_summary_report, generate_failure_details
 from utils.performance_timer import perf_timer, measure
 
 logging.basicConfig(
@@ -251,4 +251,5 @@ def run_dut_tests(config: Config, config_filename: str) -> list[TestResult]:
     else:
         print("[DEBUG] perf_timer is DISABLED, no timing data collected")
 
+    generate_failure_details(total_results, logger)
     return total_results

@@ -39,6 +39,13 @@ class Config:
         self.directory_path = args.seed_dir.resolve()
         self.mutate_directory = (args.mutate_out or (self.directory_path / 'mutate')).resolve()
         self.out_dir = args.out_dir.resolve()
+        self.xor_cache_dir = (args.xor_cache_dir.resolve()
+                              if args.xor_cache_dir is not None
+                              else self.out_dir / 'spike_resolution')
+        self.xor_cache_mode = str(args.xor_cache_mode)
+        self.export_difuzz_si = bool(args.export_difuzz_si)
+        self.difuzz_si_dir = args.difuzz_si_dir.resolve() if args.difuzz_si_dir else None
+        self.difuzz_si_template = str(args.difuzz_si_template)
 
         self.enable_ext = bool(args.enable_ext)
         self.exclude_extensions = list(args.exclude_ext)

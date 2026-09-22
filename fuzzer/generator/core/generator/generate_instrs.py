@@ -14,13 +14,9 @@
 import os
 import re
 import random
-import time
-import numpy as np
+import numpy as np  # pyright: ignore[reportMissingImports]
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-
-# Performance timing enabled via environment variable
-PERF_ENABLED = os.environ.get("DIVEFUZZ_PERF_ENABLE", "0") == "1"
 from ...asm_template_manager import create_template_instance, TemplateInstance
 from ...asm_template_manager.riscv_asm_syntex import ArchConfig
 from ...asm_template_manager.ext_list import allowed_ext
@@ -36,6 +32,8 @@ from ...instr_generator import (
 )
 from ...reg_analyzer import temp_asm_to_debug_generate
 from ...utils import list2str
+from ...utils.phase_profiler import phase, reset_phase_profile, write_phase_profile
+from ...coverage.difuzz_si_exporter import export_difuzz_si as write_difuzz_si
 from .register_history import RegisterHistory
 from ...instr_generator.label_manager import LabelManager
 from ...config.config_manager import MAX_MUTATE_TIME
@@ -45,7 +43,12 @@ def generate_instructions(instr_number: int,
                           is_cva6: bool,
                           is_rv32: bool,
                           arch: ArchConfig,
-                          template_type: str):
+                          template_type: str,
+                          out_dir: str | None = None,
+                          xor_cache_dir: str | None = None,
+                          export_difuzz_si: bool = False,
+                          difuzz_si_dir: str | None = None,
+                          difuzz_si_template: str = 'p-m'):
     """
     Generate random RISC-V instructions for a single seed.
 
@@ -56,10 +59,13 @@ def generate_instructions(instr_number: int,
         is_cva6: Target CVA6 processor
         is_rv32: Use RV32 architecture
         arch: Architecture configuration for template creation
+        out_dir: Output directory for seed files (default: cwd/out-seeds)
     """
+    reset_phase_profile("divefuzztest", seed_times, instr_number)
     # Create fresh template instance for this seed with random type and values
     # This ensures each seed gets independent random content (CSR, register init, etc.)
-    template = create_template_instance(arch, template_type)
+    with phase("setup"):
+        template = create_template_instance(arch, template_type)
 
     # Calculate the total of explicitly assigned probabilities
     total_specified_prob = sum(allowed_ext.special_probabilities.values())
@@ -84,18 +90,13 @@ def generate_instructions(instr_number: int,
     label_mgr = LabelManager()
     # Randomly select a template
     file_name = "seeds_{}_.S".format(seed_times)
-    current_dir = Path.cwd()
-    new_directory = current_dir / 'out-seeds'
+    new_directory = Path(out_dir) if out_dir is not None else Path.cwd() / 'out-seeds'
 
     new_filename = os.path.join(new_directory, os.path.basename(file_name))
     
     resolve_duplicates = 0
     resolve_duplicates_fail = 0
     c_instr_consecutive_number = 0
-    # Track cumulative time for performance measurement
-    # time_accumulator['spike'] = spike.debug_cmd_str_elf_file execution time
-    # time_accumulator['compile'] = generate_elf execution time
-    time_accumulator = {'spike': 0.0, 'compile': 0.0} if PERF_ENABLED else None
     c_extension = [ "RV64_C", "RV_C"]
     
     #### V ext enable:
@@ -107,7 +108,7 @@ def generate_instructions(instr_number: int,
 
     if v_ext_enable:
         # v_instr_init
-        entire_instrs.append(v_instr_init)
+        entire_instrs.append(v_instr_init)  # pyright: ignore[reportUndefinedVariable]
     # TO rv32
     for i in range(instr_number):
         is_c_extension = False
@@ -312,73 +313,74 @@ def generate_instructions(instr_number: int,
                 # TODO Currently does not support spike debug for vector instructions (vec)
                 if eliminate_enable and extension != 'RV_V':
                     with ThreadPoolExecutor(max_workers = max_w) as executor:
-                                is_diff_rs = 0
-                                mutate_time = 0
-                                while is_diff_rs == 0 and mutate_time < MAX_MUTATE_TIME:
-                                    # Note: If the temp_asm_to_debug function directly modifies updated_content,
-                                    # be aware of thread safety issues
-                                    if is_rv32:
-                                        while True:
-                                            complete_instr = generate_new_instr(instr, extension, rd_history, rs_history, \
-                                                            frd_history,frs_history)
-                                            if (not any(rv32_not_support_csr in complete_instr for rv32_not_support_csr in rv32_not_support_csrs)) and ("minstret" not in complete_instr):
-                                                break
-                                        
-                                        # Check backward loop protection before Spike verification
-                                        if label_mgr.is_jump_active() and label_mgr.get_jump_type() == 'backward':
-                                            counter_reg = label_mgr.get_loop_counter_reg()
-                                            instr_parts = complete_instr.split()
-                                            if len(instr_parts) >= 2 and instr_parts[1].rstrip(',') == counter_reg:
-                                                mutate_time += 1
-                                                continue  # Regenerate instruction without Spike verification
-
-                                        future = executor.submit(
-                                            temp_asm_to_debug_generate,
-                                            tuple(entire_instrs),
-                                            complete_instr,
-                                            True,
-                                            label_mgr.get_current_label(),
-                                            template,
-                                            time_accumulator
-                                        )
-                                        # Wait for thread tasks to complete and retrieve the results
-                                        is_diff_rs = future.result()
-
-                                        mutate_time += 1
-                                        if is_diff_rs == 3:
-                                            continue
-                                        elif is_diff_rs == 1:
-                                            break
-
-                                    else:
+                        is_diff_rs = 0
+                        mutate_time = 0
+                        while is_diff_rs == 0 and mutate_time < MAX_MUTATE_TIME:
+                            # Note: If the temp_asm_to_debug function directly modifies updated_content,
+                            # be aware of thread safety issues
+                            if is_rv32:
+                                while True:
+                                    with phase("instruction_generation"):
                                         complete_instr = generate_new_instr(instr, extension, rd_history, rs_history, \
-                                                            frd_history,frs_history)
-
-                                        
-                                        if label_mgr.is_jump_active() and label_mgr.get_jump_type() == 'backward':
-                                            counter_reg = label_mgr.get_loop_counter_reg()
-                                            instr_parts = complete_instr.split()
-                                            if len(instr_parts) >= 2 and instr_parts[1].rstrip(',') == counter_reg:
-                                                mutate_time += 1
-                                                continue  
-
-                                        future = executor.submit(
-                                            temp_asm_to_debug_generate,
-                                            tuple(entire_instrs),
-                                            complete_instr,
-                                            True,
-                                            label_mgr.get_current_label(),
-                                            template,
-                                            time_accumulator
-                                        )
-
-                                        is_diff_rs = future.result()
-
+                                                        frd_history,frs_history)
+                                    if (not any(rv32_not_support_csr in complete_instr for rv32_not_support_csr in rv32_not_support_csrs)) and ("minstret" not in complete_instr):
+                                        break
+                                
+                                # Check backward loop protection before Spike verification
+                                if label_mgr.is_jump_active() and label_mgr.get_jump_type() == 'backward':
+                                    counter_reg = label_mgr.get_loop_counter_reg()
+                                    instr_parts = complete_instr.split()
+                                    if len(instr_parts) >= 2 and instr_parts[1].rstrip(',') == counter_reg:
                                         mutate_time += 1
-                                        if is_diff_rs == 3:
-                                            continue
-                                        elif is_diff_rs == 1:
-                                            break
+                                        continue  # Regenerate instruction without Spike verification
+
+                                future = executor.submit(
+                                    temp_asm_to_debug_generate,
+                                    tuple(entire_instrs),
+                                    complete_instr,
+                                    True,
+                                    label_mgr.get_current_label(),
+                                    template,
+                                    xor_cache_dir=xor_cache_dir
+                                )
+                                # Wait for thread tasks to complete and retrieve the results
+                                is_diff_rs = future.result()
+
+                                mutate_time += 1
+                                if is_diff_rs == 3:
+                                    continue
+                                elif is_diff_rs == 1:
+                                    break
+
+                            else:
+                                with phase("instruction_generation"):
+                                    complete_instr = generate_new_instr(instr, extension, rd_history, rs_history, \
+                                                        frd_history,frs_history)
+
+                                if label_mgr.is_jump_active() and label_mgr.get_jump_type() == 'backward':
+                                    counter_reg = label_mgr.get_loop_counter_reg()
+                                    instr_parts = complete_instr.split()
+                                    if len(instr_parts) >= 2 and instr_parts[1].rstrip(',') == counter_reg:
+                                        mutate_time += 1
+                                        continue  
+
+                                future = executor.submit(
+                                    temp_asm_to_debug_generate,
+                                    tuple(entire_instrs),
+                                    complete_instr,
+                                    True,
+                                    label_mgr.get_current_label(),
+                                    template,
+                                    xor_cache_dir=xor_cache_dir
+                                )
+
+                                is_diff_rs = future.result()
+
+                                mutate_time += 1
+                                if is_diff_rs == 3:
+                                    continue
+                                elif is_diff_rs == 1:
+                                    break
                                 
                                 if mutate_time >= MAX_MUTATE_TIME:
                                     resolve_duplicates_fail += 1
@@ -387,12 +389,14 @@ def generate_instructions(instr_number: int,
                 else:
                     if is_rv32:
                         while True:
-                            complete_instr = generate_new_instr(instr, extension, rd_history, rs_history, \
-                                                        frd_history,frs_history)
+                            with phase("instruction_generation"):
+                                complete_instr = generate_new_instr(instr, extension, rd_history, rs_history, \
+                                                            frd_history,frs_history)
                             if (not any(rv32_not_support_csr in complete_instr for rv32_not_support_csr in rv32_not_support_csrs)) and ("minstret" not in complete_instr):
                                 break
                     else:
-                        complete_instr = generate_new_instr(instr, extension, rd_history, rs_history, \
+                        with phase("instruction_generation"):
+                            complete_instr = generate_new_instr(instr, extension, rd_history, rs_history, \
                                                         frd_history,frs_history)
 
                         if extension == 'RV_V':
@@ -411,12 +415,21 @@ def generate_instructions(instr_number: int,
 
         entire_instrs.append(complete_instr)
     
-    write_instructions_to_file(new_filename, list2str(entire_instrs), template)
+    with phase("output_cleanup"):
+        if export_difuzz_si:
+            si_dir = Path(difuzz_si_dir) if difuzz_si_dir is not None else new_directory
+            si_path = si_dir / f"seeds_{seed_times}_.si"
+            write_difuzz_si(
+                entire_instrs,
+                si_path,
+                method="divefuzztest",
+                seed_id=f"seeds_{seed_times}_",
+                template_snapshot=template,
+            )
+        write_instructions_to_file(new_filename, list2str(entire_instrs), template)
+    write_phase_profile()
 
-    # Return spike_time and compile_time from time_accumulator
-    spike_time = time_accumulator['spike'] if time_accumulator else 0.0
-    compile_time = time_accumulator['compile'] if time_accumulator else 0.0
-    return resolve_duplicates, resolve_duplicates_fail, spike_time, compile_time
+    return resolve_duplicates, resolve_duplicates_fail
 
 
 def write_instructions_to_file(new_filename: str, instructions: str, template: TemplateInstance):

@@ -20,6 +20,29 @@ from .constants import *
 from .template_instance import TemplateInstance
 from .constants import TemplateType, HOOK_MAIN
 import random
+
+def _init_random_mem_region(
+    p: AsmProgram,
+    total_bytes: int = 8192,
+    random_bytes: int = 1024,
+) -> AsmProgram:
+    """
+    Initialize the load/store memory region with random data and zero padding.
+
+    The random prefix preserves memory-operation diversity while the zero-filled
+    tail keeps generated assembly size manageable.
+    """
+    random_words = random_bytes // 4
+    for i in range(0, random_words, 8):
+        batch_size = min(8, random_words - i)
+        words = [f"0x{random.getrandbits(32):08x}" for _ in range(batch_size)]
+        p.data_word(*words)
+
+    remaining_bytes = total_bytes - random_bytes
+    if remaining_bytes > 0:
+        p.data_zero(remaining_bytes)
+
+    return p
 # ==============================================================================
 # Private Helper Functions (Internal Use Only)
 # ==============================================================================
@@ -1015,33 +1038,133 @@ def build_template_nutshell(arch: ArchConfig) -> AsmProgram:
     return p
 
 
+def _rocket_mstatus() -> int:
+    """Generate Rocket-compatible MSTATUS value.
+
+    Rocket (RV64GC) has F/D extensions but no vector extension.
+    FS is always enabled (≥ 1) and VS is forced to 0.
+    """
+    val = 0
+
+    # MPV(39), GVA(38), MBE(37), SBE(36)
+    for bit in [39, 38, 37, 36]:
+        val |= (random.randint(0, 1) << bit)
+
+    # SXL[1:0] (35–34) & UXL[1:0] (33–32)
+    sxl = random.choice([1, 2])
+    uxl = random.choice([1, 2])
+    val |= (sxl << 34)
+    val |= (uxl << 32)
+
+    # TSR(22), TW(21), TVM(20), MXR(19), SUM(18), MPRV(17)
+    for bit in [22, 21, 20, 19, 18, 17]:
+        val |= (random.randint(0, 1) << bit)
+
+    # XS[1:0] (16–15), FS[1:0] (14–13), VS[1:0] (10–9)
+    xs = random.randint(0, 3)
+    fs = random.randint(1, 3)  # Never Off — Rocket has F/D
+    vs = 0                      # Rocket has no vector extension
+    val |= (xs << 15)
+    val |= (fs << 13)
+    val |= (vs << 9)
+
+    # MPP[1:0] (12–11)
+    mpp = random.choice([0, 1, 3])
+    val |= (mpp << 11)
+
+    # SPP(8), MPIE(7), UBE(6), SPIE(5), MIE(3), SIE(1)
+    for bit in [8, 7, 6, 5, 3, 1]:
+        val |= (random.randint(0, 1) << bit)
+
+    return val & ((1 << 64) - 1)
+
+
+def _rocket_init(p: AsmProgram) -> AsmProgram:
+    """
+    [Rocket] Mode basic initialization:
+    - Write Rocket-compatible MSTATUS/MIE, PMP/PMA
+    - Enter init via mret
+    """
+    p.label(LBL_INIT_ENV)
+    ms_val = _rocket_mstatus()
+    mpp = (ms_val >> 11) & 0b11
+
+    p.li("x26", f"0x{ms_val:016x}")
+    p.csrw(CSR.MSTATUS, "x26", comment=f"MSTATUS (mode is {mpp})")
+    # Build PMP (Physical Memory Protection) setup.
+    if mpp != 3:
+        p.la("x16", LBL_MAIN)
+        p.csrw(0x3b0, "x16")
+        p.li("x16", 0xf)
+        p.csrw(0x3a0, "x16")
+
+        p.instr("sfence.vma x0, x0")
+
+    p.li("x26", "0x0")
+    p.csrw(CSR.MIE, "x26", comment="MIE")
+    p.mret()
+    return p
+
+
+def _rocket_init_reg(p: AsmProgram) -> AsmProgram:
+    """
+    [Rocket] Initialize floating-point and general-purpose registers.
+
+    Rocket (RV64GC) does not support Zfh (half-precision float), so only
+    fmv.w.x and fmv.d.x are used for FPR initialization. fflags is cleared
+    to ensure consistent initial state for cosimulation.
+    """
+    p.label(LBL_INIT)
+
+    major_modes = [0, 1, 2, 3, 4]
+    minor_modes = [5, 6, 7]
+
+    if random.random() < 0.95:
+        rm = random.choice(major_modes)
+    else:
+        rm = random.choice(minor_modes)
+
+    p.instr("fsrmi", str(rm))
+    # Clear fflags for cosim consistency (RISC-V spec does not mandate reset value)
+    p.instr("csrwi", "fflags", "0")
+
+    # === General-purpose register initialization ===
+    for r in range(16):
+        rand_val = random.getrandbits(64)
+        p.li(f"x{r}", f"0x{rand_val:016x}")
+        # Rocket has no Zfh — fmv.h.x unsupported, only w.x / d.x
+        op = random.choice(["fmv.w.x", "fmv.d.x"])
+        p.instr(op, f"f{r}", f"x{r}")
+
+    p.li("t6", "0x80000000")
+
+    p.instr("j", LBL_MAIN)
+
+    p.align(12)
+    return p
+
+
 def build_template_rocket(arch: ArchConfig) -> AsmProgram:
     """
-    Build complete XiangShan S-mode template.
+    Build complete Rocket template.
 
-    This template runs in supervisor mode with virtual memory (SATP/page tables).
+    Follows the same structural pattern as the XiangShan template for
+    consistent coverage-experiment comparison. Rocket-specific adaptations:
+    - MSTATUS: VS=0 (no vector extension), FS≥1 (has F/D)
+    - FPR init: fmv.w.x / fmv.d.x only (no Zfh support)
+    - fflags cleared for deterministic cosimulation
+    - PMP setup mirrors XiangShan (conditional on MPP)
     """
     p = AsmProgram(arch=arch)
 
-    if random.random() < 0:
-        _xs_text_startup(p)
-        _s_mode_pmp_setup(p)
-        _s_mode_mepc_setup(p)
-        _s_mode_supervisor_init(p)
-        _s_mode_init_sequence(p)
-        _exception_vector(p)
-        _s_mode_main_with_hook(p)
-        _common_support_routines(p)
-        _s_mode_data_sections(p)
-    else:
-        _xs_text_startup(p)
-        _xs_init(p)
-        _xs_init_reg(p)
-        _exception_vector(p)
-        _common_main_with_hook(p)
-        _common_support_routines(p)
-        _init_data_sections(p)
-
+    _xs_text_startup(p)
+    _rocket_init(p)
+    _rocket_init_reg(p)
+    _exception_vector(p)
+    # _common_test_done(p)
+    _common_main_with_hook(p)
+    _common_support_routines(p)
+    _init_data_sections(p)
 
     return p
 

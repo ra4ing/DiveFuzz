@@ -12,14 +12,93 @@
 # See the Mulan PSL v2 for more details.
 
 import os
+import shutil
+import signal
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
-from tqdm import tqdm
+from pathlib import Path
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from tqdm import tqdm  # pyright: ignore[reportMissingModuleSource]
 from .generate_instrs import generate_instructions
 from ...asm_template_manager.riscv_asm_syntex import ArchConfig
 
-# Performance timing support
-PERF_ENABLED = os.environ.get("DIVEFUZZ_PERF_ENABLE", "0") == "1"
+
+def _process_children(pid: int) -> list[int]:
+    """Return direct child PIDs for a process by scanning /proc."""
+
+    children = []
+    proc_root = Path("/proc")
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        stat_path = entry / "stat"
+        try:
+            stat = stat_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        right_paren = stat.rfind(")")
+        if right_paren == -1:
+            continue
+        fields = stat[right_paren + 2:].split()
+        if len(fields) < 2:
+            continue
+        try:
+            parent_pid = int(fields[1])
+        except ValueError:
+            continue
+        if parent_pid == pid:
+            children.append(int(entry.name))
+    return children
+
+
+def _process_descendants(pid: int) -> list[int]:
+    """Return descendant PIDs deepest-first so child tools die with a timed-out worker."""
+
+    descendants = []
+    stack = _process_children(pid)
+    while stack:
+        child = stack.pop()
+        descendants.append(child)
+        stack.extend(_process_children(child))
+    descendants.reverse()
+    return descendants
+
+
+def _terminate_executor_workers(executor: ProcessPoolExecutor):
+    """
+    Terminate running worker processes after a generation timeout.
+
+    DiveFuzzTest workers can be blocked inside spike_wrapper, which launches
+    shell/spike child processes.  Kill descendants first, then the worker, so a
+    timed-out seed cannot leave an orphaned spike consuming CPU forever.
+    """
+
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return
+
+    for process in processes.values():
+        if not process.is_alive():
+            continue
+        for child_pid in _process_descendants(process.pid):
+            try:
+                os.kill(child_pid, signal.SIGTERM)
+            except OSError:
+                pass
+        process.terminate()
+
+    time.sleep(0.2)
+
+    for process in processes.values():
+        if process.is_alive():
+            for child_pid in _process_descendants(process.pid):
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            process.kill()
+
+    for process in processes.values():
+        process.join(timeout=1)
 
 
 def generate_instructions_parallel(instr_number: int,
@@ -29,7 +108,13 @@ def generate_instructions_parallel(instr_number: int,
                                    is_rv32: bool,
                                    max_workers: int,
                                    arch: ArchConfig,
-                                   template_type: str):
+                                    template_type: str,
+                                    out_dir: str | None = None,
+                                    xor_cache_dir: Path | None = None,
+                                    xor_cache_mode: str = 'preserve',
+                                    export_difuzz_si: bool = False,
+                                    difuzz_si_dir: str | None = None,
+                                    difuzz_si_template: str = 'p-m'):
     """
     Generate random RISC-V instructions in parallel across multiple processes.
 
@@ -49,117 +134,131 @@ def generate_instructions_parallel(instr_number: int,
     resolve_duplicates_fail = 0
     timeout_count = 0
 
-    # The timeout period = the number of instructions * 0.8 seconds
-    timeout_seconds = instr_number * 0.8
+    timeout_scale = float(os.environ.get("DIVEFUZZ_TIMEOUT_SCALE", "0.12"))
+    timeout_seconds = instr_number * timeout_scale
     # Maximum retry count to prevent unlimited retries
     max_retries = 5
 
     print("---Start generate instrs---")
     print(f"# Timeout per seed: {timeout_seconds}s")
 
-    # The list of seed indexes to be generated
+    if eliminate_enable and xor_cache_dir is not None:
+        if xor_cache_mode == 'reset' and xor_cache_dir.exists():
+            shutil.rmtree(xor_cache_dir)
+        xor_cache_dir.mkdir(parents=True, exist_ok=True)
+
     pending_seeds = list(range(seed_times))
     completed_count = 0
     retry_round = 0
-    # Aggregate time from all workers (cumulative, needs normalization)
-    # spike = spike.debug_cmd_str_elf_file time, compile = generate_elf time
-    total_spike_time = 0.0
-    total_compile_time = 0.0
 
-    # Time the instruction generation phase (includes spike execution in subprocesses)
-    gen_start = time.perf_counter()
+    while pending_seeds and retry_round < max_retries:
+        if retry_round > 0:
+            print(f"# Retry round {retry_round}/{max_retries} for {len(pending_seeds)} timed out seeds")
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        while pending_seeds and retry_round < max_retries:
-            if retry_round > 0:
-                print(f"# Retry round {retry_round}/{max_retries} for {len(pending_seeds)} timed out seeds")
+        retry_seeds = []
+        executor = ProcessPoolExecutor(max_workers=max_workers)
+        futures = {}
+        seed_deadlines = {}
+        force_terminate_workers = False
 
+        def _submit(seed_idx: int):
+            """Submit a seed and record its per-seed deadline."""
+            future = executor.submit(
+                generate_instructions,
+                instr_number,
+                seed_idx,
+                eliminate_enable,
+                is_cva6,
+                is_rv32,
+                arch,
+                template_type,
+                out_dir=out_dir,
+                xor_cache_dir=str(xor_cache_dir) if xor_cache_dir is not None else None,
+                export_difuzz_si=export_difuzz_si,
+                difuzz_si_dir=difuzz_si_dir,
+                difuzz_si_template=difuzz_si_template,
+            )
+            futures[future] = seed_idx
+            seed_deadlines[future] = time.monotonic() + timeout_seconds
+            return future
 
-            futures = {}
-            for seed_idx in pending_seeds:
-                future = executor.submit(
-                    generate_instructions,
-                    instr_number,
-                    seed_idx,
-                    eliminate_enable,
-                    is_cva6,
-                    is_rv32,
-                    arch,
-                    template_type
+        initial_seeds = pending_seeds[:max_workers]
+        remaining_queue = list(pending_seeds[max_workers:])
+        for seed_idx in initial_seeds:
+            _submit(seed_idx)
+
+        progress = tqdm(
+            total=len(pending_seeds),
+            desc="# Generating instructions",
+        )
+
+        try:
+            while futures:
+                earliest_deadline = min(seed_deadlines[f] for f in futures)
+                remaining_time = max(earliest_deadline - time.monotonic(), 0.1)
+
+                done, _ = wait(
+                    futures,
+                    timeout=remaining_time,
+                    return_when=FIRST_COMPLETED,
                 )
-                futures[future] = seed_idx
 
-            # Clear the pending list and get ready to collect the failed tasks
-            pending_seeds = []
+                now = time.monotonic()
 
-            # collect results
-            for future in tqdm(as_completed(futures), total=len(futures),
-                             desc="# Generating instructions"):
-                seed_idx = futures[future]
-                try:
-                    result1, result2, spike_time, compile_time = future.result(timeout=timeout_seconds)
-                    resolve_duplicates += result1
-                    resolve_duplicates_fail += result2
-                    total_spike_time += spike_time
-                    total_compile_time += compile_time
-                    completed_count += 1
-                except TimeoutError:
-                    timeout_count += 1
-                    print(f"# Seed {seed_idx} timed out ({timeout_seconds}s)")
-                    pending_seeds.append(seed_idx)
-                except Exception as e:
-                    print(f"# Error generating seed {seed_idx}: {e}")
+                if not done:
+                    timed_out_futures = [
+                        f for f in list(futures)
+                        if seed_deadlines.get(f, float("inf")) <= now
+                    ]
+                    if timed_out_futures:
+                        force_terminate_workers = True
+                    for future in timed_out_futures:
+                        seed_idx = futures.pop(future)
+                        seed_deadlines.pop(future, None)
+                        future.cancel()
+                        timeout_count += 1
+                        retry_seeds.append(seed_idx)
+                        print(f"# Seed {seed_idx} timed out ({timeout_seconds}s)")
+                        progress.update(1)
+                        if remaining_queue:
+                            _submit(remaining_queue.pop(0))
+                    continue
 
-            retry_round += 1
+                for future in done:
+                    seed_idx = futures.pop(future)
+                    seed_deadlines.pop(future, None)
+                    try:
+                        result1, result2 = future.result()
+                        resolve_duplicates += result1
+                        resolve_duplicates_fail += result2
+                        completed_count += 1
+                    except Exception as e:
+                        print(f"# Error generating seed {seed_idx}: {e}")
+                    progress.update(1)
+                    if remaining_queue:
+                        _submit(remaining_queue.pop(0))
+        finally:
+            if futures:
+                force_terminate_workers = True
+                for future in list(futures):
+                    seed_idx = futures.pop(future)
+                    future.cancel()
+                    retry_seeds.append(seed_idx)
 
-        if pending_seeds:
-            print(f"# {len(pending_seeds)} seeds failed after {max_retries} retry rounds, skipping")
+            if force_terminate_workers:
+                _terminate_executor_workers(executor)
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                executor.shutdown(wait=True)
+            progress.close()
 
-    perf_gen_time = time.perf_counter() - gen_start
+        pending_seeds = retry_seeds
+        retry_round += 1
+
+    if pending_seeds:
+        print(f"# {len(pending_seeds)} seeds failed after {max_retries} retry rounds, skipping")
 
     print(f"# Successfully generated: {completed_count}/{seed_times} seeds")
     print(f"# Total timeouts: {timeout_count}")
     print(f"# Total conflict avoidances: {resolve_duplicates}")
     print(f"# Total failed conflict avoidances: {resolve_duplicates_fail}")
-
-    # Report timing to global performance timer if enabled
-    if PERF_ENABLED:
-        try:
-            # Use absolute import to avoid relative import issues
-            from utils.performance_timer import perf_timer
-
-            # When using parallel workers, spike/compile times are cumulative (sum of all workers)
-            # but perf_gen_time is wall-clock time. We need to normalize.
-            # Wall-clock time ≈ cumulative time / effective_workers
-            if completed_count > 0:
-                effective_workers = min(max_workers, completed_count)
-
-                # Calculate wall-clock time for spike and compile
-                # spike = spike.debug_cmd_str_elf_file, compile = generate_elf
-                wall_spike_time = total_spike_time / effective_workers
-                wall_compile_time = total_compile_time / effective_workers
-
-                # Ensure spike + compile time doesn't exceed total generation time
-                combined_time = wall_spike_time + wall_compile_time
-                if combined_time > perf_gen_time * 0.95:
-                    # Scale down proportionally
-                    scale = (perf_gen_time * 0.95) / combined_time
-                    wall_spike_time *= scale
-                    wall_compile_time *= scale
-
-                # Instruction generation time = total - spike - compile
-                instr_gen_only = perf_gen_time - wall_spike_time - wall_compile_time
-                instr_gen_only = max(0.0, instr_gen_only)  # Ensure non-negative
-            else:
-                wall_spike_time = 0.0
-                wall_compile_time = 0.0
-                instr_gen_only = perf_gen_time
-
-            # Report 3 phases: instruction_gen, spike_execution, compilation
-            perf_timer.add_time(perf_timer.PHASE_INSTRUCTION_GEN, instr_gen_only)
-            perf_timer.add_time(perf_timer.PHASE_SPIKE_EXECUTION, wall_spike_time)
-            perf_timer.add_time(perf_timer.PHASE_COMPILATION, wall_compile_time)
-        except ImportError as e:
-            print(f"[PerfTimer] Import error in generator: {e}")
-        except Exception as e:
-            print(f"[PerfTimer] Error adding time in generator: {e}")

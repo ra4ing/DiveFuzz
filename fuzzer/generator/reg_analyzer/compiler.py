@@ -15,6 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 from ..asm_template_manager import temp_file_manager
+from ..utils.phase_profiler import phase
 
 def generate_elf(source_path: str, spike_args: str, arch_bits: int = 64):
     # For spike resolution RS value
@@ -51,13 +52,15 @@ def generate_elf(source_path: str, spike_args: str, arch_bits: int = 64):
             
     try:
         compile_cmd = [compiler_as, spike_args, source_path, '-o', object_file]
-        result = subprocess.run(compile_cmd)
+        with phase("compile_link"):
+            result = subprocess.run(compile_cmd)
         if result.returncode != 0:
             print(f"Compilation failed.")
             return None
 
         link_cmd = [compiler_ld, '-T', str(link_dir), object_file, '-o', elf_file]
-        result = subprocess.run(link_cmd)
+        with phase("compile_link"):
+            result = subprocess.run(link_cmd)
         if result.returncode != 0:
             print(f"Linking failed.")
             return None

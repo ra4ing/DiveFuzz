@@ -45,7 +45,8 @@ def process_content(file_path: str,
                     exclude_extensions: List[str],
                     eliminate_enable: bool,
                     arch: ArchConfig,
-                    template_type: str):
+                    template_type: str,
+                    xor_cache_dir: str | None = None):
     """
     Process and mutate instructions in a single file.
 
@@ -127,7 +128,14 @@ def process_content(file_path: str,
                                 # Note: If the temp_asm_to_debug function directly modifies updated_content, 
                                 # thread safety issues need to be considered.
                                 modified_instr = modify_instruction_inc(line, prob, get_instruction_type(instr_name))
-                                future = executor.submit(temp_asm_to_debug, tuple(updated_content), modified_instr, True)
+                                future = executor.submit(
+                                    temp_asm_to_debug,
+                                    tuple(updated_content),
+                                    modified_instr,
+                                    template,
+                                    True,
+                                    xor_cache_dir=xor_cache_dir
+                                )
                                 is_diff_rs = future.result()
                                 mutate_time += 1
                                 if is_diff_rs == 3:

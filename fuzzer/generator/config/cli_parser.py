@@ -94,6 +94,28 @@ def create_parser():
         default=Path('out-seeds-2025-test'),
         help='Output seed file directory in generate mode (used in generate mode)'
     )
+    parser.add_argument(
+        '--xor-cache-dir', type=Path,
+        default=None,
+        help='Directory for elimination XOR cache files (<opcode>_xor_values.txt). Default: <out-dir>/spike_resolution'
+    )
+    parser.add_argument(
+        '--xor-cache-mode', choices=('preserve', 'reset'),
+        default='preserve',
+        help='preserve reuses existing XOR cache files; reset clears the cache directory before work'
+    )
+    parser.add_argument(
+        '--export-difuzz-si', action='store_true',
+        help='Emit difuzz-rtl .si sidecars for coverage replay experiments'
+    )
+    parser.add_argument(
+        '--difuzz-si-dir', type=Path, default=None,
+        help='Directory for .si sidecars (default: out-seeds)'
+    )
+    parser.add_argument(
+        '--difuzz-si-template', default='p-m-astra',
+        help='difuzz-rtl template selector for exported .si files'
+    )
 
     # —— Additional options for mutation ——
     parser.add_argument(

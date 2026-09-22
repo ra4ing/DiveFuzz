@@ -13,6 +13,7 @@
 
 import os
 import logging
+import shutil
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -27,10 +28,12 @@ def mutate_instructions_parallel(directory_path: Path,
                                  mutate_directory: Path,
                                  max_workers: int,
                                  enable_ext: bool,
-                                 exclude_extensions: List[str],
-                                 eliminate_enable: bool,
-                                 arch: ArchConfig,
-                                 template_type: str):
+                                  exclude_extensions: List[str],
+                                  eliminate_enable: bool,
+                                  arch: ArchConfig,
+                                  template_type: str,
+                                  xor_cache_dir: Path | None = None,
+                                  xor_cache_mode: str = 'preserve'):
     """
     Mutate instructions in parallel across multiple processes.
 
@@ -51,6 +54,10 @@ def mutate_instructions_parallel(directory_path: Path,
     else:
         processed_data = collect_data(directory_path)
     mutate_directory.mkdir(parents=True, exist_ok=True)
+    if eliminate_enable and xor_cache_dir is not None:
+        if xor_cache_mode == 'reset' and xor_cache_dir.exists():
+            shutil.rmtree(xor_cache_dir)
+        xor_cache_dir.mkdir(parents=True, exist_ok=True)
 
     print("---Start mutation instrs---")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -65,7 +72,8 @@ def mutate_instructions_parallel(directory_path: Path,
                 exclude_extensions,
                 eliminate_enable,
                 arch,
-                template_type
+                template_type,
+                xor_cache_dir=str(xor_cache_dir) if xor_cache_dir is not None else None
             ) for file_path, content in processed_data.items()
         ]
 
