@@ -165,6 +165,9 @@ class InstructionValidator:
         self.use_stateful_cache = use_stateful_cache
         self.bug_filter_enable = bug_filter_enable
 
+        # Accepted-program instruction tail (generated-program info).
+        self.accepted_history: List[str] = []
+
     def _read_register(self, reg_idx: int) -> int:
         """Read register value by index (0-31: XPR, 32-63: FPR)."""
         if reg_idx < 32:
@@ -241,6 +244,7 @@ class InstructionValidator:
             assembly=instruction,
             s_pre=s_pre,
             s_post=s_post,
+            history=list(self.accepted_history),
         )
 
     def validate_instruction(self, instruction: str) -> Tuple[bool, int]:
@@ -442,6 +446,9 @@ class InstructionValidator:
             self.spike_session.confirm_instruction()
             if timer:
                 timer.mark("t_confirm")
+            self.accepted_history.extend(
+                line for line in instruction.splitlines() if line.strip()
+            )
             candidate_timing.finish_attempt(
                 timer,
                 accepted=True,

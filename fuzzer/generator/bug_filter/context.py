@@ -439,6 +439,10 @@ class FilterContext:
 
     is_rv32: bool = False
 
+    # Accepted-program instruction tail; static/generated-program
+    # information available to every filter policy.
+    history: List[str] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Pre-execution helpers — delegate to _LazyPreState for on-demand queries
     # ------------------------------------------------------------------

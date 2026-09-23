@@ -52,6 +52,22 @@ def register_architecture_filters(
         from . import rocket_filters
 
         rocket_filters.register_filters(registry)
+    elif arch == "exp_static":
+        # Filtering-specificity experiment, category 1:
+        # static / generated-program information only.
+        from . import exp_static_filters
+
+        exp_static_filters.register_filters(registry)
+    elif arch == "exp_pre":
+        # Category 2: adds pre-execution runtime state.
+        from . import exp_pre_filters
+
+        exp_pre_filters.register_filters(registry)
+    elif arch == "exp_prepost":
+        # Category 3: adds post-execution runtime state.
+        from . import exp_prepost_filters
+
+        exp_prepost_filters.register_filters(registry)
 
 
 def get_supported_architectures() -> list:
