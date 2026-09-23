@@ -242,6 +242,23 @@ ALLOWED_EXT_ROCKET = [
 ]
 
 # Rocket RV32 mode (without 64-bit instructions)
+ALLOWED_EXT_ROCKET_NOC = [
+    "RV_ZICSR",       # CSR instructions
+    "rv_zifencei",    # FENCE.I instruction
+    "RV_I",           # Base integer instructions
+    "RV64_I",         # RV64 specific instructions (e.g., LD, SD, ADDIW)
+    "RV_M",           # Multiplication extension
+    "RV64_M",         # RV64 multiplication (e.g., MULW, DIVW)
+    "RV_A",           # Atomic extension
+    "RV64_A",         # RV64 atomic (e.g., LR.D, SC.D)
+    "RV_F",           # Single-precision floating-point
+    "RV64_F",         # RV64 FP (e.g., FCVT.L.S)
+    "RV_D",           # Double-precision floating-point
+    "RV64_D",         # RV64 double (e.g., FCVT.L.D)
+]
+# Same as ALLOWED_EXT_ROCKET minus the four C-family extensions: the main
+# body is assembled under .option norvc, so compressed opcodes can never be
+# emitted there and C draws only burn instruction-budget iterations.
 ALLOWED_EXT_ROCKET_RV32 = [
     "RV_ZICSR",
     "rv_zifencei",
@@ -266,5 +283,6 @@ ALLOWED_EXT_PROFILES = {
     "boom": ALLOWED_EXT_BOOM,
     "xiangshan": ALLOWED_EXT_XIANGSHAN,
     "rocket": ALLOWED_EXT_ROCKET,
+    "rocket_noc": ALLOWED_EXT_ROCKET_NOC,
     "rocket_rv32": ALLOWED_EXT_ROCKET_RV32,
 }
