@@ -159,6 +159,40 @@ class _LazyPreState:
         return self._csrs
 
 
+class _FrozenPreState(_LazyPreState):
+    """Pre-execution state that snapshots every exposed value on construction.
+
+    The lazy base reads each field from the simulator on first access, so a
+    filter consulting s_pre only after execution would silently observe
+    post-execution values.  This subclass eagerly copies everything once,
+    before any instruction runs.
+    """
+
+    def __init__(self, spike_session: "SpikeSession"):
+        super().__init__(spike_session)
+        self._xpr = [spike_session.get_xpr(idx) for idx in range(32)]
+        self._xpr_loaded = True
+        self._fpr = [spike_session.get_fpr(idx) for idx in range(32)]
+        self._fpr_loaded = True
+        self._pc = spike_session.get_current_pc()
+        privilege = spike_session.get_privilege_state()
+        self._privilege = privilege.prv
+        self._virtualization = privilege.v
+        self._priv_loaded = True
+        reservation = spike_session.get_reservation_state()
+        self._reservation_valid = reservation.valid
+        self._reservation_addr = reservation.address
+        self._res_loaded = True
+        self._csrs = dict(spike_session.get_all_csrs())
+        self._csr_cache.update(self._csrs)
+        self._csr_all_loaded = True
+        if spike_session.is_vector_enabled():
+            self._vector_state = spike_session.get_vector_state(
+                include_regfile=False
+            )
+        self._vec_loaded = True
+
+
 class _LazyPostState:
     __slots__ = (
         "_ss",
@@ -386,7 +420,7 @@ class _LazyPostState:
 # still works because isinstance checks are rarely used on these objects).
 # ---------------------------------------------------------------------------
 
-PreExecutionState = _LazyPreState
+PreExecutionState = _FrozenPreState
 PostExecutionState = _LazyPostState
 
 

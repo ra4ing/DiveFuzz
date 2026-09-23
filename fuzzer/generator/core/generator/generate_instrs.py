@@ -669,6 +669,10 @@ def generate_instructions(
 
                     is_direct_jump = instr in DIRECT_JUMP_INSTRS
                     is_indirect_jump = instr in INDIRECT_JUMP_INSTRS
+                    jump_histories = (
+                        list(rd_history.history), list(rs_history.history),
+                        list(frd_history.history), list(frs_history.history),
+                    ) if is_direct_jump or is_indirect_jump else None
 
                     if is_direct_jump:
                         # The last instruction cannot be a jump instruction because there are no subsequent labels.
@@ -720,13 +724,19 @@ def generate_instructions(
                                 except Exception:
                                     compiled_seq = None
 
-                                # Execute with checkpoint protection if compilation succeeded
-                                if compiled_seq is not None:
-                                    execute_sequence_with_checkpoint(
-                                        spike_session,
-                                        compiled_seq.codes,
-                                        compiled_seq.sizes,
-                                    )
+                            # Accept only a sequence Spike actually executed.
+                            if spike_session is not None and (
+                                compiled_seq is None
+                                or not execute_sequence_with_checkpoint(
+                                    spike_session, compiled_seq.codes, compiled_seq.sizes
+                                )
+                            ):
+                                rd_history.history = jump_histories[0]
+                                rs_history.history = jump_histories[1]
+                                frd_history.history = jump_histories[2]
+                                frs_history.history = jump_histories[3]
+                                total_instr_retry += 1
+                                continue
 
                             # Append to output with labels (for assembly file readability)
                             entire_instrs.append(init_instr)
@@ -801,13 +811,19 @@ def generate_instructions(
                                 except Exception:
                                     compiled_seq = None
 
-                                # Execute with checkpoint protection if compilation succeeded
-                                if compiled_seq is not None:
-                                    execute_sequence_with_checkpoint(
-                                        spike_session,
-                                        compiled_seq.codes,
-                                        compiled_seq.sizes,
-                                    )
+                            # Accept only a sequence Spike actually executed.
+                            if spike_session is not None and (
+                                compiled_seq is None
+                                or not execute_sequence_with_checkpoint(
+                                    spike_session, compiled_seq.codes, compiled_seq.sizes
+                                )
+                            ):
+                                rd_history.history = jump_histories[0]
+                                rs_history.history = jump_histories[1]
+                                frd_history.history = jump_histories[2]
+                                frs_history.history = jump_histories[3]
+                                total_instr_retry += 1
+                                continue
 
                             # Append to output with labels
                             # IMPORTANT: Use actual offset from compiled_seq instead of label reference
@@ -910,13 +926,19 @@ def generate_instructions(
                             except Exception:
                                 compiled_seq = None
 
-                            # Execute with checkpoint protection if compilation succeeded
-                            if compiled_seq is not None:
-                                execute_sequence_with_checkpoint(
-                                    spike_session,
-                                    compiled_seq.codes,
-                                    compiled_seq.sizes,
-                                )
+                        # Accept only a sequence Spike actually executed.
+                        if spike_session is not None and (
+                            compiled_seq is None
+                            or not execute_sequence_with_checkpoint(
+                                spike_session, compiled_seq.codes, compiled_seq.sizes
+                            )
+                        ):
+                            rd_history.history = jump_histories[0]
+                            rs_history.history = jump_histories[1]
+                            frd_history.history = jump_histories[2]
+                            frs_history.history = jump_histories[3]
+                            total_instr_retry += 1
+                            continue
 
                         # Append to output with labels
                         # IMPORTANT: Use actual auipc+addi from compiled_seq instead of 'la' pseudo-instruction
