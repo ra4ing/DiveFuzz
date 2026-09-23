@@ -128,6 +128,10 @@ SPECIAL_PROB_ROCKET_RV32 = {
     # Use uniform distribution by default
 }
 
+SPECIAL_PROB_ROCKET_NOC = {
+    # Use uniform distribution by default
+}
+
 SPECIAL_PROB_PROFILES = {
     "cva6": SPECIAL_PROB_CVA6,
     "cva6_cascade": SPECIAL_PROB_CVA6_CASCADE,
@@ -139,5 +143,6 @@ SPECIAL_PROB_PROFILES = {
     'boom': SPECIAL_PROB_BOOM,
     'xiangshan': SPECIAL_PROB_XIANGSHAN,
     'rocket': SPECIAL_PROB_ROCKET,
+    'rocket_noc': SPECIAL_PROB_ROCKET_NOC,
     'rocket_rv32': SPECIAL_PROB_ROCKET_RV32,
 }

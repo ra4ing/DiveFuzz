@@ -91,12 +91,16 @@ def _xs_init(p: AsmProgram) -> AsmProgram:
     p.li("x26", f"0x{ms_val:016x}")
     p.csrw(CSR.MSTATUS, "x26", comment=f"MSTATUS (mode is {mpp})")
     # Build PMP (Physical Memory Protection) setup.
-    # TODO support more PMP config
+    # Allow-all NAPOT (same as RevFuzz/astra): pmpaddr0 = all 1s covers the
+    # entire address space with R+W+X, so PMP stays ENABLED (CSR paths still
+    # exercised for coverage) but can never fault fetch. The old TOR setup
+    # (pmpaddr0=&main, pmpcfg0=0xf, pmpaddr1=0) is treated as an empty region
+    # by Spike but TRAPS on the difuzz-rtl Rocket/Boom models, killing seeds.
     if mpp != 3:
-        p.la("x16", LBL_MAIN)
-        p.csrw(0x3b0, "x16")
-        p.li("x16", 0xf)
-        p.csrw(0x3a0, "x16")
+        p.li("x16", -1)
+        p.csrw(0x3b0, "x16", comment="pmpaddr0 = all 1s (NAPOT full coverage)")
+        p.li("x16", 0x1f)
+        p.csrw(0x3a0, "x16", comment="pmpcfg0: entry 0 = NAPOT+RWX")
 
         p.instr("sfence.vma x0, x0")
 
@@ -291,10 +295,10 @@ def _s_mode_pmp_setup(p: AsmProgram) -> AsmProgram:
     [S-mode] Build PMP (Physical Memory Protection) setup.
     """
     p.label(LBL_PMP_SETUP)
-    p.la("x16", LBL_MAIN)
-    p.csrw(0x3b0, "x16")
-    p.li("x16", 0xf)
-    p.csrw(0x3a0, "x16")
+    p.li("x16", -1)
+    p.csrw(0x3b0, "x16", comment="pmpaddr0 = all 1s (NAPOT full coverage)")
+    p.li("x16", 0x1f)
+    p.csrw(0x3a0, "x16", comment="pmpcfg0: entry 0 = NAPOT+RWX")
     p.instr("sfence.vma")
     return p
 
@@ -573,10 +577,10 @@ def _u_mode_pmp_setup(p: AsmProgram) -> AsmProgram:
     [U-mode] Build PMP setup.
     """
     p.label(LBL_PMP_SETUP)
-    p.la("x29", LBL_MAIN)
-    p.csrw(0x3b0, "x29")
-    p.li("x29", 0xf)
-    p.csrw(0x3a0, "x29")
+    p.li("x29", -1)
+    p.csrw(0x3b0, "x29", comment="pmpaddr0 = all 1s (NAPOT full coverage)")
+    p.li("x29", 0x1f)
+    p.csrw(0x3a0, "x29", comment="pmpcfg0: entry 0 = NAPOT+RWX")
     return p
 
 
@@ -1092,11 +1096,13 @@ def _rocket_init(p: AsmProgram) -> AsmProgram:
     p.li("x26", f"0x{ms_val:016x}")
     p.csrw(CSR.MSTATUS, "x26", comment=f"MSTATUS (mode is {mpp})")
     # Build PMP (Physical Memory Protection) setup.
+    # Allow-all NAPOT (same as RevFuzz/astra); see the comment at the first
+    # init site for why the old TOR setup is replaced.
     if mpp != 3:
-        p.la("x16", LBL_MAIN)
-        p.csrw(0x3b0, "x16")
-        p.li("x16", 0xf)
-        p.csrw(0x3a0, "x16")
+        p.li("x16", -1)
+        p.csrw(0x3b0, "x16", comment="pmpaddr0 = all 1s (NAPOT full coverage)")
+        p.li("x16", 0x1f)
+        p.csrw(0x3a0, "x16", comment="pmpcfg0: entry 0 = NAPOT+RWX")
 
         p.instr("sfence.vma x0, x0")
 
@@ -1136,7 +1142,9 @@ def _rocket_init_reg(p: AsmProgram) -> AsmProgram:
         op = random.choice(["fmv.w.x", "fmv.d.x"])
         p.instr(op, f"f{r}", f"x{r}")
 
-    p.li("t6", "0x80000000")
+    p.la("t6", SYM_MEM_REGION)
+    p.li("t5", "4096")
+    p.instr("add", "t6", "t6", "t5")
 
     p.instr("j", LBL_MAIN)
 
@@ -1165,6 +1173,11 @@ def build_template_rocket(arch: ArchConfig) -> AsmProgram:
     _common_main_with_hook(p)
     _common_support_routines(p)
     _init_data_sections(p)
+    p.section(".mem_region", flags="aw", sect_type="@progbits")
+    p.align(4)
+    p.label(SYM_MEM_REGION)
+    _init_random_mem_region(p, random_bytes=4096)
+    p.label(SYM_MEM_REGION_END)
 
     return p
 
