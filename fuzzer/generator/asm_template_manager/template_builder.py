@@ -1095,15 +1095,15 @@ def _rocket_init(p: AsmProgram) -> AsmProgram:
 
     p.li("x26", f"0x{ms_val:016x}")
     p.csrw(CSR.MSTATUS, "x26", comment=f"MSTATUS (mode is {mpp})")
-    # Build PMP (Physical Memory Protection) setup.
-    # Allow-all NAPOT (same as RevFuzz/astra); see the comment at the first
-    # init site for why the old TOR setup is replaced.
+    # Keep memory accessible even if a generated CSR/trap changes privilege.
+    # M-mode-only startup without a PMP entry can trap on the later tohost store.
+    p.li("x16", -1)
+    p.csrw(0x3b0, "x16", comment="pmpaddr0 = all 1s (NAPOT full coverage)")
+    p.li("x16", 0x1f)
+    p.csrw(0x3a0, "x16", comment="pmpcfg0: entry 0 = NAPOT+RWX")
+    p.li("x16", 0)
+    p.csrw(0x3a2, "x16", comment="pmpcfg2 = 0 (disable entries 8-15)")
     if mpp != 3:
-        p.li("x16", -1)
-        p.csrw(0x3b0, "x16", comment="pmpaddr0 = all 1s (NAPOT full coverage)")
-        p.li("x16", 0x1f)
-        p.csrw(0x3a0, "x16", comment="pmpcfg0: entry 0 = NAPOT+RWX")
-
         p.instr("sfence.vma x0, x0")
 
     p.li("x26", "0x0")
