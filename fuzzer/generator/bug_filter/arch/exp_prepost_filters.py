@@ -34,8 +34,20 @@ CSR_WRITE_OPCODES = {"csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"}
 # Causes whose tval conventionally carries a value (faulting address or
 # instruction bits).  A tval of 0 here is implementation freedom (noise).
 VALUE_BEARING_CAUSES = {0, 1, 2, 4, 5, 6, 7, 12, 13, 15}
-# WPRI-masked CSR note: mstatus (0x300) writes may drop unsupported bits; the
-# dropped-bit choice is implementation freedom.
+# Bits whose "requested but dropped by the model" outcome constitutes WARL/WPRI
+# normalization noise.  ISA knowledge (category-1 legal), used here by the
+# post filter to confirm the normalization actually happened.
+_MSTATUS_WRITABLE = (
+    (1 << 1) | (1 << 3) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8)
+    | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14)
+    | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22)
+)
+NORMALIZATION_SENSITIVE_MASKS = {
+    0x300: ~_MSTATUS_WRITABLE & ((1 << 64) - 1),  # mstatus WPRI/RO bits
+    0x305: 0x3,  # mtvec direct-mode low bits
+    0x105: 0x3,  # stvec
+    0x205: 0x3,  # vstvec
+}
 SCALAR_FP_LOAD_OPCODES = {"flw", "fld", "flh", "flq"}
 
 
@@ -83,16 +95,17 @@ def f_trap_zero_tval(ctx):
     name="PP-csr-warl-normalized",
     opcodes=sorted(CSR_WRITE_OPCODES),
     description=(
-        "Noise N3 (outcome side): the reference model WARL-normalized a CSR "
-        "write (readback != requested).  The DUT may keep the requested value "
-        "or normalize differently; both are legal.  Observable only after the "
-        "write executed.  Exercised with mstatus WPRI bits, which the pre-side "
-        "mtvec alignment rule cannot see."
+        "Noise N3 (outcome side): the reference model dropped bits the write "
+        "requested (WARL/WPRI normalization).  The DUT may keep them or drop "
+        "a different subset; both are legal.  Observable only after the "
+        "write executed.  Bits outside the normalization-sensitive mask are "
+        "ignored, so clean writes are never rejected."
     ),
 )
 def f_csr_warl_normalized(ctx):
     addr = parse_csr_from_operands(_opers(ctx), _op(ctx))
-    if addr is None:
+    mask = NORMALIZATION_SENSITIVE_MASKS.get(addr)
+    if mask is None:
         return FilterResult.accept()
     if _op(ctx) in {"csrrwi", "csrrsi", "csrrci"}:
         requested = parse_int_token(_opers(ctx)[2]) if len(_opers(ctx)) > 2 else None
@@ -102,13 +115,13 @@ def f_csr_warl_normalized(ctx):
         return FilterResult.accept()
     requested &= (1 << 64) - 1
     readback = ctx.get_post_csr(addr) & ((1 << 64) - 1)
-    if readback != requested:
+    dropped = requested & mask & ~readback
+    if dropped:
         return FilterResult.reject(
-            f"CSR 0x{addr:x} write normalized: requested 0x{requested:x}, "
-            f"readback 0x{readback:x} (N3)"
+            f"CSR 0x{addr:x} write normalized: dropped requested bits "
+            f"0x{dropped:x} of 0x{requested:x} (N3)"
         )
     return FilterResult.accept()
-
 
 @post_execution_filter(
     name="PP-sc-failed",

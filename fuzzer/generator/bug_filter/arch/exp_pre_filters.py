@@ -127,7 +127,8 @@ def f_mtvec_unaligned_write(ctx):
     ),
 )
 def f_hfence_gvma_reserved_vmid(ctx):
-    value = _reg_operand_value(ctx, 2)
+    # hfence.gvma rs1, rs2  ->  operands[1] is rs2
+    value = _reg_operand_value(ctx, 1)
     if value is None:
         return FilterResult.accept()
     if value & HFENCE_VMID_RESERVED_MASK:
