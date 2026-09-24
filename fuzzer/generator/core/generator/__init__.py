@@ -20,6 +20,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from tqdm import tqdm  # pyright: ignore[reportMissingModuleSource]
 from .generate_instrs import generate_instructions
 from ...asm_template_manager.riscv_asm_syntex import ArchConfig
+from ...reg_analyzer.xor_cache_sqlite import prepare as prepare_exact_cache
 
 
 def _process_children(pid: int) -> list[int]:
@@ -146,6 +147,8 @@ def generate_instructions_parallel(instr_number: int,
         if xor_cache_mode == 'reset' and xor_cache_dir.exists():
             shutil.rmtree(xor_cache_dir)
         xor_cache_dir.mkdir(parents=True, exist_ok=True)
+    if eliminate_enable and os.environ.get("DFT_FAST_ENGINE") == "1":
+        prepare_exact_cache(Path(xor_cache_dir or "spike_resolution"))
 
     pending_seeds = list(range(seed_times))
     completed_count = 0
@@ -207,22 +210,27 @@ def generate_instructions_parallel(instr_number: int,
 
                 if not done:
                     timed_out_futures = [
-                        f for f in list(futures)
-                        if seed_deadlines.get(f, float("inf")) <= now
+                        f for f in futures if seed_deadlines[f] <= now
                     ]
-                    if timed_out_futures:
-                        force_terminate_workers = True
+                    if not timed_out_futures:
+                        continue
+                    # A timed-out worker remains in its ProcessPool slot
+                    # until killed. Submitting another seed to that pool
+                    # queues it behind the hang and starts its deadline
+                    # before it can run. Terminate this pool now and retry
+                    # every unfinished/queued seed in a fresh pool.
+                    force_terminate_workers = True
                     for future in timed_out_futures:
                         seed_idx = futures.pop(future)
-                        seed_deadlines.pop(future, None)
+                        seed_deadlines.pop(future)
                         future.cancel()
                         timeout_count += 1
                         retry_seeds.append(seed_idx)
                         print(f"# Seed {seed_idx} timed out ({timeout_seconds}s)")
                         progress.update(1)
-                        if remaining_queue:
-                            _submit(remaining_queue.pop(0))
-                    continue
+                    retry_seeds.extend(remaining_queue)
+                    remaining_queue.clear()
+                    break
 
                 for future in done:
                     seed_idx = futures.pop(future)
@@ -234,6 +242,7 @@ def generate_instructions_parallel(instr_number: int,
                         completed_count += 1
                     except Exception as e:
                         print(f"# Error generating seed {seed_idx}: {e}")
+                        retry_seeds.append(seed_idx)
                     progress.update(1)
                     if remaining_queue:
                         _submit(remaining_queue.pop(0))
@@ -244,6 +253,8 @@ def generate_instructions_parallel(instr_number: int,
                     seed_idx = futures.pop(future)
                     future.cancel()
                     retry_seeds.append(seed_idx)
+            retry_seeds.extend(remaining_queue)
+            remaining_queue.clear()
 
             if force_terminate_workers:
                 _terminate_executor_workers(executor)

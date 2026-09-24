@@ -21,6 +21,7 @@ from ..utils import candidate_timing
 from ..asm_template_manager import TemplateInstance
 from .instruction_parser import InstructionParser
 from .spike_resolution import Spike
+from .xor_cache_sqlite import check_and_add as exact_check_and_add
 
 
 def _resolve_xor_cache_dir(xor_cache_dir: Optional[str]) -> Path:
@@ -28,9 +29,34 @@ def _resolve_xor_cache_dir(xor_cache_dir: Optional[str]) -> Path:
 
     return Path(xor_cache_dir or "spike_resolution")
 
+def _engine_read_sources(instr_info, engine):
+    """Read candidate source registers from the live engine session.
+
+    Mirrors Spike.get_registers_values return semantics exactly: None when
+    there is nothing to read, immediate appended last when present.
+    """
+    source_regs = InstructionParser.get_source_registers(instr_info)
+    if source_regs is None or len(source_regs) == 0:
+        return [instr_info.imm] if instr_info.imm is not None else None
+    float_register = InstructionParser.is_float_instruction(instr_info)
+    values = []
+    for r in source_regs:
+        # The legacy debugger reads registers after executing the synthetic
+        # `li t5,0x2727272727` end marker. Mirror that side effect for
+        # candidates whose source is t5 (x30).
+        v = 0x2727272727 if not float_register and r in ("t5", "x30") else engine.read_register(r, float_register=float_register)
+        if v is None:
+            return None
+        values.append(v)
+    if instr_info.imm is not None:
+        values.append(instr_info.imm)
+    return values
+
+
 
 def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first: bool, label: Optional[str],
-                                template: TemplateInstance, xor_cache_dir: Optional[str] = None):
+                                template: TemplateInstance, xor_cache_dir: Optional[str] = None,
+                                engine=None, machine_code=None, execute: bool = True):
     """
     Debug-generate assembly and verify via Spike simulation.
 
@@ -85,9 +111,29 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
     if timer:
         timer.mark("t_payload")
 
-
-    # Get register values by spike
-    register_values = Spike.get_registers_values(instr_info, instr_payload_str, template)
+    # Get register values: fast engine path (checkpoint/inject/read) or
+    # legacy full-recompile replay.  Both must return identical value lists.
+    if engine is not None and engine.initialized:
+        try:
+            if execute:
+                if machine_code is None:
+                    return _finish(3, "encode")
+                engine.set_checkpoint()
+                engine.execute_one(machine_code)
+            register_values = _engine_read_sources(instr_info, engine)
+        except Exception:
+            try:
+                if execute:
+                    engine.rollback()
+            except Exception:
+                pass
+            return _finish(3, "engine")
+        if register_values is None:
+            if execute:
+                engine.rollback()
+            return _finish(3, "eval")
+    else:
+        register_values = Spike.get_registers_values(instr_info, instr_payload_str, template)
     if timer:
         timer.mark("t_eval")
     if register_values is None:
@@ -99,6 +145,11 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
         timer.mark("t_bug_filter")
     if bug_name is not None:
         print(bug_name)
+        if engine is not None and engine.initialized and execute:
+            try:
+                engine.rollback()
+            except Exception:
+                pass
         return _finish(3, "bug_filter")
 
     # Calculates the XOR value and returns it
@@ -108,6 +159,19 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
 
         resolution_dir = _resolve_xor_cache_dir(xor_cache_dir)
         os.makedirs(resolution_dir, exist_ok=True)
+        if engine is not None and engine.initialized:
+            # Same opcode/XOR key and acceptance rule as legacy text files;
+            # the unique index makes concurrent decisions atomic and avoids
+            # rereading an ever-growing file for every candidate.
+            if exact_check_and_add(resolution_dir, instr_info.op_name, xor_stderr):
+                if timer:
+                    timer.mark("t_xor_io")
+                return _finish(1, None)
+            if timer:
+                timer.mark("t_xor_io")
+            if execute:
+                engine.rollback()
+            return _finish(0, "dedup")
         xor_file_path = os.path.join(resolution_dir, f"{instr_info.op_name}_xor_values.txt")
 
         try:
@@ -127,6 +191,11 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
 
     if timer:
         timer.mark("t_xor_io")
+    if engine is not None and engine.initialized and execute:
+        try:
+            engine.rollback()
+        except Exception:
+            pass
     return _finish(0, "dedup")
 
 def temp_asm_to_debug(updated_content: Tuple[str], instr: str, template: TemplateInstance,

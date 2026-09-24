@@ -73,6 +73,92 @@ def generate_instructions(instr_number: int,
         setup_timer.mark("t_template")
     candidate_timing.finish_setup(setup_timer, phase="template")
 
+    # ---- fast engine (checkpoint-based candidate evaluation), env-gated ----
+    # DFT_FAST_ENGINE=1 swaps the per-candidate "recompile prefix + replay to
+    # marker" backend for a persistent in-process spike engine with
+    # checkpoint/rollback.  Generation strategy (sampling, register history,
+    # xor dedup, bug filter, label layout) is untouched: the engine only
+    # changes how source-register values are obtained.
+    eng = None
+    eng_enc = None
+    eng_frozen = False
+    eng_labels = {}
+    eng_dev = {"encode_fail": 0, "engine_skip": 0}
+    eng_executed_current = False
+    if eliminate_enable and os.environ.get("DFT_FAST_ENGINE") == "1":
+        from ...reg_analyzer.engine_session import EngineSession
+        from ...reg_analyzer.hybrid_encoder import HybridEncoder
+        from ...reg_analyzer.nop_template_gen import generate_nop_elf, NOP_REDUNDANCY
+        _nop_elf = f"/dev/shm/dft_nop_{seed_times}_{instr_number}.elf"
+        # Forward skips occupy real slots and loop setup/control inserts
+        # instructions beyond the requested body count. Reserve code space
+        # for both; the emitted seed still uses the unchanged template.
+        _capacity = 2 * instr_number + 64
+        generate_nop_elf(template, _capacity, _nop_elf)
+        eng = EngineSession(_nop_elf, template.isa, _capacity + NOP_REDUNDANCY)
+        if not eng.initialize():
+            raise RuntimeError(f"fast Spike engine initialization failed for seed {seed_times}")
+        eng_enc = HybridEncoder(march=template.isa, quiet=True)
+
+    def _eng_exec_text(txt, loop=False):
+        """Encode and execute a synthesized instruction, or fail this seed."""
+        if eng is None or eng_enc is None:
+            raise RuntimeError("fast Spike engine unavailable")
+        code = eng_enc.encode(txt) & 0xFFFFFFFF
+        if (code & 0x3) != 0x3:
+            raise RuntimeError(f"compressed instruction in no-C profile: {txt}")
+        if loop:
+            eng.execute_loop_control(code)
+        else:
+            eng.execute_one(code)
+        return True
+
+    def _eng_pc():
+        return eng.get_pc() if eng is not None else 0
+
+    def _eng_encode(txt):
+        if eng is None or eng_enc is None:
+            return None
+        try:
+            return eng_enc.encode(txt) & 0xFFFFFFFF
+        except Exception:
+            eng_dev["encode_fail"] += 1
+            return None
+    def _eng_forward_jump(text, skipped_instrs):
+        """Match the legacy forward label without waiting at a debug marker.
+
+        execute_sequence stops at the address after its supplied region, so a
+        taken jump must include the skipped slots. A not-taken branch must
+        execute only itself: subsequent candidates occupy those slots.
+        """
+        if eng is None:
+            raise RuntimeError("fast Spike engine unavailable")
+        code = _eng_encode(text)
+        if code is None or (code & 3) != 3:
+            raise RuntimeError(f"cannot encode forward jump: {text}")
+        opcode = code & 0x7F
+        taken = True
+        if opcode == 0x63:
+            a = eng.read_register(f"x{(code >> 15) & 31}")
+            b = eng.read_register(f"x{(code >> 20) & 31}")
+            if a is None or b is None:
+                raise RuntimeError(f"cannot read branch operands: {text}")
+            funct3 = (code >> 12) & 7
+            sa = a - (1 << 64) if a & (1 << 63) else a
+            sb = b - (1 << 64) if b & (1 << 63) else b
+            taken = {0: a == b, 1: a != b, 4: sa < sb, 5: sa >= sb,
+                     6: a < b, 7: a >= b}[funct3]
+        elif opcode not in (0x6F, 0x67):
+            raise RuntimeError(f"not a branch or jump: {text}")
+        if taken:
+            codes = [code] + [0x00000013] * skipped_instrs
+            eng.engine.execute_sequence(codes, [4] * len(codes), 64)
+        else:
+            eng.execute_one(code)
+        return taken
+
+
+
     # Calculate the total of explicitly assigned probabilities
     total_specified_prob = sum(allowed_ext.special_probabilities.values())
     remaining_prob = 1 - total_specified_prob 
@@ -137,6 +223,9 @@ def generate_instructions(instr_number: int,
                 # Forward jump: insert label definition at target position
                 label_name = label_mgr.get_current_label()
                 entire_instrs.append(f'{label_name}:')
+                if eng is not None:
+                    eng_labels[label_name] = _eng_pc()
+                    eng_frozen = False
             elif jump_type == 'backward':
                 # Backward jump: insert loop control instructions
                 jump_instr = label_mgr.get_jump_instruction()  # "addi t0, t0, -1\nbnez t0, bwd_0"
@@ -155,9 +244,16 @@ def generate_instructions(instr_number: int,
                     rs_history.use_register(counter_reg)  # addi reads counter_reg
                     rd_history.use_register(counter_reg)  # addi writes counter_reg
 
+                if eng is not None and counter_reg:
+                    # engine: run addi + bne (true negative offset), the bounded loop unwinds
+                    _eng_exec_text(f'addi {counter_reg}, {counter_reg}, -1')
+                    _tgt = jump_instr.split('\n')[-1].split()[-1]
+                    _boff = eng_labels.get(_tgt, _eng_pc()) - _eng_pc()
+                    _eng_exec_text(f'bne {counter_reg}, zero, .{_boff:+d}', loop=True)
+
             label_mgr.end_jump_sequence()
             continue
-        
+
         complete_instr = 'nop'
         if  extension == "ILL":
             instrs_complete = INSTRUCTION_FORMATS[extension]
@@ -229,6 +325,10 @@ def generate_instructions(instr_number: int,
                         # avoiding the issue where existing instructions might modify the counter
                         entire_instrs.append(f'li {counter_reg}, {loop_iterations}')
                         entire_instrs.append(f'{label}:')
+                        if eng is not None:
+                            # engine: run the counter init, label sits at current pc
+                            _eng_exec_text(f'li {counter_reg}, {loop_iterations}')
+                            eng_labels[label] = _eng_pc()
 
                         # 5. Construct loop control instructions (decrement + conditional jump)
                         # Use bne (branch if not equal) to check counter against zero
@@ -254,6 +354,13 @@ def generate_instructions(instr_number: int,
 
                         complete_instr = complete_instr.replace('{LABEL}', label)
                         entire_instrs.append(complete_instr)
+                        if eng is not None:
+                            # The sampled distance determines the actual
+                            # target; skipped instructions are engine nops
+                            # until their final ELF is assembled.
+                            eng_frozen = _eng_forward_jump(
+                                complete_instr.replace(label, f'.+{4 * (target_distance + 1)}'),
+                                target_distance)
                         continue
 
                 elif is_indirect_jump:
@@ -288,6 +395,16 @@ def generate_instructions(instr_number: int,
                     # Generate: la reg, label; jalr/c.jr/c.jalr reg
                     entire_instrs.append(f'la {chosen_reg}, {label}')
                     entire_instrs.append(complete_instr)
+                    if eng is not None and instr == 'jalr':
+                        # Expand `la reg,label` (auipc+addi), then execute
+                        # the jalr across the as-yet-unfilled K-instruction
+                        # distance to the fixed forward label.
+                        _off = 12 + 4 * target_distance
+                        _hi = (_off + 0x800) >> 12
+                        _lo = _off - (_hi << 12)
+                        _eng_exec_text(f'auipc {chosen_reg}, {_hi}')
+                        _eng_exec_text(f'addi {chosen_reg}, {chosen_reg}, {_lo}')
+                        eng_frozen = _eng_forward_jump(complete_instr, target_distance)
                     continue
 
                 elif label_mgr.is_jump_active():
@@ -299,6 +416,9 @@ def generate_instructions(instr_number: int,
                         if jump_type == 'forward':
                             label_name = label_mgr.get_current_label()
                             entire_instrs.append(f'{label_name}:')
+                            if eng is not None:
+                                eng_labels[label_name] = _eng_pc()
+                                eng_frozen = False
                         elif jump_type == 'backward':
                             jump_instr = label_mgr.get_jump_instruction()  # "addi t0, t0, -1\nbnez t0, bwd_0"
                             counter_reg = label_mgr.get_loop_counter_reg()  # "t0"
@@ -313,6 +433,11 @@ def generate_instructions(instr_number: int,
                             if counter_reg:
                                 rs_history.use_register(counter_reg)  # addi reads counter_reg
                                 rd_history.use_register(counter_reg)  # addi writes counter_reg
+                            if eng is not None and counter_reg:
+                                _eng_exec_text(f'addi {counter_reg}, {counter_reg}, -1')
+                                _tgt = jump_instr.split('\n')[-1].split()[-1]
+                                _boff = eng_labels.get(_tgt, _eng_pc()) - _eng_pc()
+                                _eng_exec_text(f'bne {counter_reg}, zero, .{_boff:+d}', loop=True)
 
                         label_mgr.end_jump_sequence()
                 max_w = 2
@@ -347,11 +472,13 @@ def generate_instructions(instr_number: int,
                                     True,
                                     label_mgr.get_current_label(),
                                     template,
-                                    xor_cache_dir=xor_cache_dir
+                                    xor_cache_dir=xor_cache_dir,
+                                    engine=eng,
+                                    machine_code=_eng_encode(complete_instr) if not eng_frozen else None,
+                                    execute=not eng_frozen
                                 )
                                 # Wait for thread tasks to complete and retrieve the results
                                 is_diff_rs = future.result()
-
                                 mutate_time += 1
                                 if is_diff_rs == 3:
                                     continue
@@ -377,11 +504,13 @@ def generate_instructions(instr_number: int,
                                     True,
                                     label_mgr.get_current_label(),
                                     template,
-                                    xor_cache_dir=xor_cache_dir
+                                    xor_cache_dir=xor_cache_dir,
+                                    engine=eng,
+                                    machine_code=_eng_encode(complete_instr) if not eng_frozen else None,
+                                    execute=not eng_frozen
                                 )
 
                                 is_diff_rs = future.result()
-
                                 mutate_time += 1
                                 if is_diff_rs == 3:
                                     continue
@@ -392,6 +521,9 @@ def generate_instructions(instr_number: int,
                                     resolve_duplicates_fail += 1
                                 else:
                                     resolve_duplicates += 1
+                        if eng is not None and is_diff_rs == 1:
+                            # candidate was executed (and kept) by the engine path
+                            eng_executed_current = True
                 else:
                     if is_rv32:
                         while True:
@@ -420,6 +552,12 @@ def generate_instructions(instr_number: int,
                 pass
 
         entire_instrs.append(complete_instr)
+        if eng is not None and not eng_executed_current and not eng_frozen:
+            # synthesized/unverified instruction (nop fallback, ILL without
+            # verify, RV_V): still advances program state in the legacy
+            # replay view, keep the engine trajectory aligned
+            _eng_exec_text(complete_instr)
+        eng_executed_current = False
     
     with phase("output_cleanup"):
         if export_difuzz_si:
@@ -435,6 +573,18 @@ def generate_instructions(instr_number: int,
         write_instructions_to_file(new_filename, list2str(entire_instrs), template)
     write_phase_profile()
     candidate_timing.flush()
+
+    if eng is not None:
+        if eng_dev["encode_fail"] or eng_dev["engine_skip"]:
+            print(f"[fast-engine] seed {seed_times} deviations: {eng_dev}")
+        try:
+            eng.close()
+        except Exception:
+            pass
+        try:
+            os.remove(f"/dev/shm/dft_nop_{seed_times}_{instr_number}.elf")
+        except OSError:
+            pass
 
 
 

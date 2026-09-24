@@ -77,6 +77,33 @@ cd ref/riscv-isa-sim-adapter/spike_wrapper
 make
 ```
 
+### Optional checkpoint engine (isolated `fast-spike-engine` branch)
+
+This branch retains DiveFuzzTest's instruction sampler, bug filter, XOR
+uniqueness key, template, and emitted assembly. Set `DFT_FAST_ENGINE=1` only
+when generating a new corpus; without it, the original replay-based generator
+is unchanged. The fast path compiles a nop-backed template once per seed,
+evaluates candidates in the checkpoint-enabled Spike engine, and uses an exact
+SQLite unique index for the same `(opcode, XOR value)` decision. The index
+serializes concurrent inserts and avoids rereading all previous values for
+each candidate. Use a **fresh** `--xor-cache-dir` for a new corpus; the legacy
+text cache is not migrated automatically.
+
+The branch requires the compiled Python 3.12 `spike_engine` extension. By
+default it reuses the sibling `DiveFuzz/ref/riscv-isa-sim-adapter/spike_engine`
+checkout; `DFT_SPIKE_ENGINE_PATH` selects a different build. This is an
+experimental corpus-production backend, not the unmodified baseline used
+for generator-performance comparisons. Report this branch and the backend
+separately from baseline generation times.
+
+From `DiveFuzzTest/fuzzer/generator`, run `source scripts/env.sh` before
+invoking `PYTHONPATH=.. DFT_FAST_ENGINE=1 python -m generator.main --generate
+-e --instr-number 1000 --seeds 50 --max-workers 10 --architecture xs
+--allowed-ext-name rocket_noc --template-type rocket --out-dir <new-dir>
+--xor-cache-dir <new-cache-dir>`. The coverage campaign runner can instead
+pass `--dft-fast-engine` to export the same switch inside its container.
+
+
 ## Environment Setup
 
 ### REF Configuration
