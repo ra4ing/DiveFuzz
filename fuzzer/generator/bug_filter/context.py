@@ -442,6 +442,10 @@ class FilterContext:
     # Accepted-program instruction tail; static/generated-program
     # information available to every filter policy.
     history: List[str] = field(default_factory=list)
+    # Generated-program execution facts the caller may provide (e.g.
+    # effective addresses of recently executed stores); still static/
+    # generated-program information.
+    env: Dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Pre-execution helpers — delegate to _LazyPreState for on-demand queries

@@ -156,6 +156,15 @@ SIGNATURES = [
     dict(id="xs6022", tier="post", phase="post", kind="trap_on",
          opcodes=["vlse64.v"], causes=[4, 5],
          source="XS#6022 open: strided load illegal address no fault"),
+    dict(id="xs6000", tier="static", phase="pre", kind="opcode_set",
+         opcodes=["c.jr", "c.jalr"], class_suppression=True,
+         source="XS#6000 open: compressed jump redirect loses isRVC (class-wide)"),
+    dict(id="xs5910", tier="pre", phase="pre", kind="jalr_target_region",
+         region=[0x10000000, 0x1F000000],
+         source="XS#5910 open: cross-page MMIO fetch reports wrong mepc/mtval"),
+    dict(id="xs5998", tier="pre", phase="pre", kind="load_overlap_crossing_store",
+         opcodes=["lb", "lbu", "lh", "lhu", "lw", "lwu", "ld"],
+         source="XS#5998 open: store-to-load forwarding misjudges partial overlap"),
     # ---- CVA6 acknowledged bugs ----
     dict(id="cva6-1466", tier="pre", phase="pre", kind="branch_not_taken_misaligned",
          source="CVA6 #1466 fixed: not-taken branch with misaligned target traps"),
@@ -555,6 +564,45 @@ def _eval_pre(ctx, sig: dict) -> Optional[str]:
         )
         if misaligned:
             return f"jalr to misaligned target 0x{target:x} (must trap)"
+        return None
+
+    if kind == "jalr_target_region":
+        if op != "jalr":
+            return None
+        if ctx.s_pre is None:
+            return None
+        base_reg, imm = _mem_operand_raw(ctx)
+        if base_reg is None:
+            return None
+        target = _effective_address_pre(ctx, base_reg, imm or 0)
+        if target is None:
+            return None
+        lo, hi = sig["region"]
+        if lo <= target < hi:
+            return (f"jalr to MMIO fetch region 0x{target:x} "
+                    f"(known cross-page fetch bug class)")
+        return None
+
+    if kind == "load_overlap_crossing_store":
+        if not _matches(op, sig):
+            return None
+        if ctx.s_pre is None:
+            return None
+        size = SCALAR_MEMORY_SIZES.get(op)
+        if not size:
+            return None
+        base_reg, imm = _mem_operand_raw(ctx)
+        if base_reg is None:
+            return None
+        lo = _effective_address_pre(ctx, base_reg, imm or 0)
+        if lo is None:
+            return None
+        hi = lo + size
+        for sea, ssize in getattr(ctx, "env", {}).get("recent_stores", []):
+            crossed = ((sea ^ (sea + ssize - 1)) >> 4) != 0
+            if crossed and not (hi <= sea or lo >= sea + ssize):
+                return (f"load [0x{lo:x},0x{hi:x}) overlaps recent 16B-crossing "
+                        f"store at 0x{sea:x} (forwarding bug class)")
         return None
 
     if kind == "misaligned_overlap_locked":
