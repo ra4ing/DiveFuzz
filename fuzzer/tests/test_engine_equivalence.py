@@ -76,9 +76,9 @@ class EngineEquivalenceTest(unittest.TestCase):
                 session.close()
                 os.environ["PATH"] = original_path
 
-    def test_code_three_keeps_instruction_appended_by_generator(self):
-        # A mixed-bank float store returns code 3, yet the original
-        # generation loop still appends it. Keep its executed state.
+    def test_code_three_discards_candidate_and_rolls_back(self):
+        # Aligned semantics: a mixed-bank float store is unevaluable (3);
+        # the caller discards it, so any engine step must be undone.
         random.seed(77518)
         template = create_template_instance(ArchConfig(64, ISA), "rocket")
         with tempfile.TemporaryDirectory(dir="/dev/shm") as temp:
@@ -94,8 +94,8 @@ class EngineEquivalenceTest(unittest.TestCase):
                     tuple(), candidate, True, None, template,
                     xor_cache_dir=temp, engine=session, machine_code=code)
                 self.assertEqual(result, 3)
-                self.assertTrue(session.candidate_executed)
-                self.assertEqual(session.get_pc(), pc_before + 4)
+                self.assertFalse(session.candidate_executed)
+                self.assertEqual(session.get_pc(), pc_before)
             finally:
                 session.close()
 

@@ -122,6 +122,11 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
             # Retry this seed rather than silently diverging from the ELF.
             raise
         if register_values is None:
+            # Code-3 candidates are discarded by the aligned caller; undo
+            # any engine step so the checkpoint state matches the prefix.
+            if execute:
+                engine.rollback()
+                engine.candidate_executed = False
             return _finish(3, "eval")
     else:
         # Only the legacy backend needs to rebuild and compile the entire
@@ -147,8 +152,9 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
         timer.mark("t_bug_filter")
     if bug_name is not None:
         print(bug_name)
-        # The original caller appends code-3 candidates; preserve the
-        # resulting architectural state. Only duplicates are rolled back.
+        if engine is not None and engine.initialized and execute:
+            engine.rollback()
+            engine.candidate_executed = False
         return _finish(3, "bug_filter")
 
     # Calculates the XOR value and returns it

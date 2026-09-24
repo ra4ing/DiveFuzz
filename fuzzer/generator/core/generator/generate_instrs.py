@@ -157,6 +157,29 @@ def generate_instructions(instr_number: int,
             eng.execute_one(code)
         return taken
 
+    def _redraw_unevaluable():
+        """Re-draw extension+opcode for a code-3 (unevaluable) candidate.
+
+        RevFuzz discards the whole candidate on failure; dft's retry only
+        randomized operands, which is a no-op for single-instruction pools
+        (rv_zifencei -> fence.i re-failed ten times and was appended).
+        """
+        for _ in range(20):
+            ext = np.random.choice(allowed_ext.allowed_ext, p=probabilities)
+            pool = list(INSTRUCTION_FORMATS[ext].keys())
+            flt = [i for i in pool if not i.startswith('c.')
+                   and i not in special_instr
+                   and i not in ('jal', 'beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu', 'jalr')]
+            if label_mgr.is_jump_active():
+                flt = [i for i in flt
+                       if 'LABEL' not in get_instruction_format(i).get('variables', [])
+                       and 'JUMP' not in get_instruction_format(i).get('category', [])
+                       and 'BRANCH' not in get_instruction_format(i).get('category', [])]
+            if flt:
+                return ext, random.choice(flt)
+        return extension, instr
+
+
 
 
     # Calculate the total of explicitly assigned probabilities
@@ -446,7 +469,10 @@ def generate_instructions(instr_number: int,
                     with ThreadPoolExecutor(max_workers = max_w) as executor:
                         is_diff_rs = 0
                         mutate_time = 0
-                        while is_diff_rs == 0 and mutate_time < MAX_MUTATE_TIME:
+                        # Aligned with RevFuzz: duplicates (0) AND unevaluable
+                        # candidates (3, e.g. unparseable fence.i) are discarded
+                        # and resampled; only acceptance (1) exits the loop.
+                        while is_diff_rs != 1 and mutate_time < MAX_MUTATE_TIME:
                             # Note: If the temp_asm_to_debug function directly modifies updated_content,
                             # be aware of thread safety issues
                             if is_rv32:
@@ -480,10 +506,10 @@ def generate_instructions(instr_number: int,
                                 # Wait for thread tasks to complete and retrieve the results
                                 is_diff_rs = future.result()
                                 mutate_time += 1
-                                if is_diff_rs == 3:
-                                    continue
-                                elif is_diff_rs == 1:
+                                if is_diff_rs == 1:
                                     break
+                                if is_diff_rs == 3:
+                                    extension, instr = _redraw_unevaluable()
 
                             else:
                                 with phase("instruction_generation"):
@@ -512,19 +538,18 @@ def generate_instructions(instr_number: int,
 
                                 is_diff_rs = future.result()
                                 mutate_time += 1
-                                if is_diff_rs == 3:
-                                    continue
-                                elif is_diff_rs == 1:
+                                if is_diff_rs == 1:
                                     break
+                                if is_diff_rs == 3:
+                                    extension, instr = _redraw_unevaluable()
                                 
                                 if mutate_time >= MAX_MUTATE_TIME:
                                     resolve_duplicates_fail += 1
                                 else:
                                     resolve_duplicates += 1
                         if eng is not None:
-                            # Even a code-3 candidate is appended by the
-                            # original generator. Preserve an engine step
-                            # that already ran; only a duplicate was undone.
+                            # Only accepted (or exhaustion-appended) candidates
+                            # reach the corpus; discarded ones were rolled back.
                             eng_executed_current = eng.candidate_executed
                 else:
                     if is_rv32:
