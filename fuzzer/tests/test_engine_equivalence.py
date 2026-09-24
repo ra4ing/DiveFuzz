@@ -12,7 +12,7 @@ from pathlib import Path
 
 from generator.asm_template_manager import create_template_instance
 from generator.asm_template_manager.riscv_asm_syntex import ArchConfig
-from generator.reg_analyzer import _engine_read_sources
+from generator.reg_analyzer import _engine_read_sources, temp_asm_to_debug_generate
 from generator.reg_analyzer.engine_session import EngineSession, SPIKE_ENGINE_AVAILABLE
 from generator.reg_analyzer.hybrid_encoder import HybridEncoder
 from generator.reg_analyzer.instruction_parser import InstructionParser
@@ -75,6 +75,29 @@ class EngineEquivalenceTest(unittest.TestCase):
             finally:
                 session.close()
                 os.environ["PATH"] = original_path
+
+    def test_code_three_keeps_instruction_appended_by_generator(self):
+        # A mixed-bank float store returns code 3, yet the original
+        # generation loop still appends it. Keep its executed state.
+        random.seed(77518)
+        template = create_template_instance(ArchConfig(64, ISA), "rocket")
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as temp:
+            elf = str(Path(temp) / "initial.elf")
+            generate_nop_elf(template, 80, elf)
+            session = EngineSession(elf, ISA, 80 + NOP_REDUNDANCY)
+            self.assertTrue(session.initialize())
+            try:
+                candidate = "fsw fa7, 4(t6)"
+                code = HybridEncoder(march=ISA, quiet=True).encode(candidate)
+                pc_before = session.get_pc()
+                result = temp_asm_to_debug_generate(
+                    tuple(), candidate, True, None, template,
+                    xor_cache_dir=temp, engine=session, machine_code=code)
+                self.assertEqual(result, 3)
+                self.assertTrue(session.candidate_executed)
+                self.assertEqual(session.get_pc(), pc_before + 4)
+            finally:
+                session.close()
 
 
 if __name__ == "__main__":

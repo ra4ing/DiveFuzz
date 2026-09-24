@@ -91,6 +91,8 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
 
     op_name = instr.split()[0] if instr.split() else None
     n_source_values = None
+    if engine is not None:
+        engine.candidate_executed = False
 
     with phase("prefix_materialization"):
         # parse instruction
@@ -101,15 +103,6 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
             return _finish(3, "parse")
         op_name = instr_info.op_name
 
-        # first time to look up RSx value
-        instr_payload_str = list2str(updated_content)
-        if is_first:
-            if label is not None:
-                instr_payload_str += '\n' + instr_processed + '\n' + f'{label}:' + '\n  li t5,0x2727272727\n'
-            else:
-                instr_payload_str += '\n' + instr_processed + '\n  li t5,0x2727272727\n'
-    if timer:
-        timer.mark("t_payload")
 
     # Get register values: fast engine path (checkpoint/inject/read) or
     # legacy full-recompile replay.  Both must return identical value lists.
@@ -120,19 +113,28 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
                     return _finish(3, "encode")
                 engine.set_checkpoint()
                 engine.execute_one(machine_code)
+                engine.candidate_executed = True
             register_values = _engine_read_sources(instr_info, engine)
         except Exception:
-            try:
-                if execute:
-                    engine.rollback()
-            except Exception:
-                pass
-            return _finish(3, "engine")
-        if register_values is None:
             if execute:
                 engine.rollback()
+            # A failed engine step cannot be appended to the retained state.
+            # Retry this seed rather than silently diverging from the ELF.
+            raise
+        if register_values is None:
             return _finish(3, "eval")
     else:
+        # Only the legacy backend needs to rebuild and compile the entire
+        # accepted prefix for every candidate.
+        with phase("prefix_materialization"):
+            instr_payload_str = list2str(updated_content)
+            if is_first:
+                if label is not None:
+                    instr_payload_str += '\n' + instr_processed + '\n' + f'{label}:' + '\n  li t5,0x2727272727\n'
+                else:
+                    instr_payload_str += '\n' + instr_processed + '\n  li t5,0x2727272727\n'
+        if timer:
+            timer.mark("t_payload")
         register_values = Spike.get_registers_values(instr_info, instr_payload_str, template)
     if timer:
         timer.mark("t_eval")
@@ -145,11 +147,8 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
         timer.mark("t_bug_filter")
     if bug_name is not None:
         print(bug_name)
-        if engine is not None and engine.initialized and execute:
-            try:
-                engine.rollback()
-            except Exception:
-                pass
+        # The original caller appends code-3 candidates; preserve the
+        # resulting architectural state. Only duplicates are rolled back.
         return _finish(3, "bug_filter")
 
     # Calculates the XOR value and returns it
@@ -171,6 +170,7 @@ def temp_asm_to_debug_generate(updated_content: Tuple[str], instr: str, is_first
                 timer.mark("t_xor_io")
             if execute:
                 engine.rollback()
+                engine.candidate_executed = False
             return _finish(0, "dedup")
         xor_file_path = os.path.join(resolution_dir, f"{instr_info.op_name}_xor_values.txt")
 

@@ -87,6 +87,7 @@ class EngineSession:
         self.engine = None
         self._sq = None
         self.initialized = False
+        self.candidate_executed = False
 
     def initialize(self) -> bool:
         if not SPIKE_ENGINE_AVAILABLE:

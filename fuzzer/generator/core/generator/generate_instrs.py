@@ -521,9 +521,11 @@ def generate_instructions(instr_number: int,
                                     resolve_duplicates_fail += 1
                                 else:
                                     resolve_duplicates += 1
-                        if eng is not None and is_diff_rs == 1:
-                            # candidate was executed (and kept) by the engine path
-                            eng_executed_current = True
+                        if eng is not None:
+                            # Even a code-3 candidate is appended by the
+                            # original generator. Preserve an engine step
+                            # that already ran; only a duplicate was undone.
+                            eng_executed_current = eng.candidate_executed
                 else:
                     if is_rv32:
                         while True:
