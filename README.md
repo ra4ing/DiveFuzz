@@ -80,9 +80,11 @@ make
 ### Optional checkpoint engine (isolated `fast-spike-engine` branch)
 
 This branch retains DiveFuzzTest's instruction sampler, bug filter, XOR
-uniqueness key, template, and emitted assembly. Set `DFT_FAST_ENGINE=1` only
-when generating a new corpus; without it, the original replay-based generator
-is unchanged. The fast path compiles a nop-backed template once per seed,
+uniqueness key, template and final assembly writer. Individual random seeds
+are **not** expected to be byte-identical across independent runs.
+Set `DFT_FAST_ENGINE=1` only when generating a new corpus; without it, the
+original replay-based generator is unchanged. The fast path compiles a
+nop-backed template once per seed,
 evaluates candidates in the checkpoint-enabled Spike engine, and uses an exact
 SQLite unique index for the same `(opcode, XOR value)` decision. The index
 serializes concurrent inserts and avoids rereading all previous values for
