@@ -287,13 +287,12 @@ def _locked_no_perm_region(ctx):
         perms = byte & 0x7
         if not locked or perms != 0 or a_field != 3:  # NAPOT = A encoding 3
             continue
-        addr = ctx.get_csr(0x3B0 + i)
+        raw = ctx.get_csr(0x3B0 + i)
         ones = 0
-        while addr & 1:
+        while (raw >> ones) & 1:
             ones += 1
-            addr >>= 1
-        base = (addr << 2) & FULL64
-        size = ((1 << ones) if ones else 1) * 4
+        base = ((raw & ~((1 << ones) - 1)) << 2) & FULL64
+        size = (1 << ones) * 4
         return base, base + size
     return None
 
