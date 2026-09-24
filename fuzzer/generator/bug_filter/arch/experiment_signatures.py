@@ -69,8 +69,6 @@ SIGNATURES = [
     # ---- noise (RISC-V-legal implementation differences) ----
     dict(id="n1-counter-csr", tier="static", phase="pre", kind="operand_csr_addr",
          csr_sets="counter", source="spec: counter/timer values implementation-sensitive"),
-    dict(id="n2-misaligned-ea", tier="pre", phase="pre", kind="ea_misaligned",
-         opcodes=sorted(SCALAR_MEMORY_SIZES), source="spec: misaligned handling is implementation freedom"),
     dict(id="n3a-mtvec-unaligned", tier="pre", phase="pre", kind="csr_write_bits",
          csr=[0x305, 0x105, 0x205], mask=0x3, source="spec: mtvec WARL"),
     dict(id="n3b-wpri-dropped", tier="post", phase="post", kind="csr_readback_dropped",
@@ -204,6 +202,8 @@ SIGNATURES = [
     dict(id="rkt3829", tier="pre", phase="pre", kind="pmp_empty_tor_load",
          opcodes=["lb", "lbu", "lh", "lhu", "lw", "lwu", "ld", "flh", "flw", "fld"],
          source="Rocket #3829 open: empty TOR PMP entry causes access faults"),
+    dict(id="n2-misaligned-ea", tier="pre", phase="pre", kind="ea_misaligned",
+         opcodes=sorted(SCALAR_MEMORY_SIZES), source="spec: misaligned handling is implementation freedom"),
 ]
 
 # ---------------------------------------------------------------------------
