@@ -390,6 +390,8 @@ def generate_instructions(
                 initialized = spike_session.initialize()
                 if frame_timer:
                     frame_timer.mark("t_spike_init")
+                if initialized and spike_session.state_acquisition == "replay":
+                    spike_session.save_initial_checkpoint()
                 if initialized:
                     # Attach to shared XOR cache from Master process
                     if xor_cache_state is not None:

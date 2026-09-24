@@ -318,6 +318,11 @@ class InstructionValidator:
         if timer:
             timer.mark("t_parse")
 
+        if self.spike_session.state_acquisition == "replay":
+            self.spike_session.replay_to_current_position()
+            if timer:
+                timer.mark("t_replay_acq")
+
         source_values = [self._read_register(r) for r in source_regs]
         if immediate is not None:
             source_values.append(immediate)

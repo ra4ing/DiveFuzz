@@ -22,6 +22,7 @@ Simplified API (v3.0):
 - Python layer manually reads registers before/after execution for XOR validation
 """
 
+import os
 import sys
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -114,6 +115,20 @@ class SpikeSession:
         # State tracking
         self.checkpoint_set: bool = False
         self.initialized: bool = False
+        # State-acquisition mode: "retained" (default) or "replay" (ablation:
+        # restore the named 'initial' checkpoint and re-execute every accepted
+        # sequence before each candidate evaluation, reproducing replay-based
+        # state acquisition inside one persistent process).
+        self.state_acquisition = os.environ.get(
+            "DIVEFUZZ_STATE_ACQUISITION", "retained"
+        )
+        if self.state_acquisition not in ("retained", "replay"):
+            raise RuntimeError(
+                f"unknown DIVEFUZZ_STATE_ACQUISITION: {self.state_acquisition}"
+            )
+        # Ordered log of accepted sequences (machine_codes, sizes) for replay.
+        self.accepted_log = []
+        self._last_sequence = None
 
     def initialize(self) -> bool:
         """
@@ -184,6 +199,7 @@ class SpikeSession:
         """
         if not self.initialized:
             raise RuntimeError("Session not initialized. Call initialize() first.")
+        self._last_sequence = (list(machine_codes), list(sizes))
 
         try:
             return self.engine.execute_sequence(machine_codes, sizes, max_steps)
@@ -240,6 +256,9 @@ class SpikeSession:
 
         Clears checkpoint flag so next operation will set new checkpoint if needed.
         """
+        if self._last_sequence is not None:
+            self.accepted_log.append(self._last_sequence)
+            self._last_sequence = None
         self.checkpoint_set = False
 
     def restore_checkpoint_and_reset(self):
@@ -267,6 +286,36 @@ class SpikeSession:
             import traceback
             traceback.print_exc()
             raise
+
+    def save_initial_checkpoint(self):
+        """
+        Save the post-initialization state as the named 'initial' checkpoint.
+        Must be called once right after initialize() when
+        DIVEFUZZ_STATE_ACQUISITION=replay.
+        """
+        if not self.initialized:
+            raise RuntimeError("Session not initialized")
+        self.engine.save_named_checkpoint("initial")
+
+    def replay_to_current_position(self):
+        """
+        Re-acquire the candidate-position state the replay way: restore the
+        named 'initial' checkpoint, then re-execute every accepted sequence in
+        order.  Ablation path for DIVEFUZZ_STATE_ACQUISITION=replay; raises on
+        failure so divergence is visible instead of silent.
+        """
+        if not self.initialized:
+            raise RuntimeError("Session not initialized")
+        self.engine.restore_named_checkpoint("initial")
+        codes = []
+        sizes = []
+        for seq_codes, seq_sizes in self.accepted_log:
+            codes.extend(seq_codes)
+            sizes.extend(seq_sizes)
+        if not codes:
+            return
+        budget = max(10000, 200 * len(codes))
+        self.engine.execute_sequence(codes, sizes, budget)
 
     def get_current_pc(self) -> int:
         """

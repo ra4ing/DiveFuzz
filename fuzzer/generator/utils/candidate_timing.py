@@ -58,6 +58,7 @@ _attempt_open: bool = False
 ATTEMPT_SEGMENTS = (
     "t_encode",
     "t_parse",
+    "t_replay_acq",
     "t_state_query",
     "t_dedup_check",
     "t_pre_filter",
