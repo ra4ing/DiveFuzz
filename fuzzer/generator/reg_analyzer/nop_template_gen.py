@@ -125,6 +125,15 @@ class NopTemplateGenerator:
                 shutil.move(elf_path, output_path)
                 elf_path = output_path
 
+            # The legacy compiler registers the temporary .o with a global
+            # manager but never reaps it on the fast path. Remove it per seed
+            # to avoid filling Docker's 64 MiB /dev/shm during a long corpus.
+            object_path = os.path.splitext(asm_path)[0] + ".o"
+            try:
+                os.remove(object_path)
+            except FileNotFoundError:
+                pass
+
             # Clean up assembly file unless keep_asm is True
             if not keep_asm:
                 try:
