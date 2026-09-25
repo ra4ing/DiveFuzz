@@ -56,8 +56,11 @@ from .experiment_filter_utils import (
     parse_memory_operand,
 )
 
-TIERS = ("static", "pre", "post")
+TIERS = ("text", "static", "pre", "post")
 TIER_RANK = {t: i for i, t in enumerate(TIERS)}
+# Paper-level grouping: text+static are "static information" (program text,
+# config, generation history); pre+post are "dynamic architectural state"
+# (observed before / after candidate execution).
 
 FULL64 = (1 << 64) - 1
 
@@ -67,29 +70,42 @@ FULL64 = (1 << 64) - 1
 
 SIGNATURES = [
     # ---- noise (RISC-V-legal implementation differences) ----
-    dict(id="n1-counter-csr", tier="static", phase="pre", kind="operand_csr_addr",
+    dict(id="n1-counter-csr", tier="text", phase="pre", kind="operand_csr_addr",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          csr_sets="counter", source="spec: counter/timer values implementation-sensitive"),
     dict(id="n3a-mtvec-unaligned", tier="pre", phase="pre", kind="csr_write_bits",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          csr=[0x305, 0x105, 0x205], mask=0x3, source="spec: mtvec WARL"),
     dict(id="n3b-wpri-dropped", tier="post", phase="post", kind="csr_readback_dropped",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          source="spec: WPRI bits may be dropped"),
     dict(id="n4-sc-no-reservation", tier="pre", phase="pre", kind="sc_no_reservation",
+         class_opcodes=["sc.w", "sc.d"],
          source="spec: SC failure reporting is implementation freedom"),
     # ---- XiangShan acknowledged bugs ----
     dict(id="xs2464", tier="static", phase="pre", kind="history_seq",
+         class_opcodes=["add"],
          source="XS#2464 fixed: fused slli+add mis-decode"),
-    dict(id="xs2642", tier="post", phase="post", kind="fpr_nan_result",
-         opcodes=["fmadd.d"], source="XS#2642 fixed: fmadd.d non-canonical NaN"),
+    dict(id="xs2642", tier="pre", phase="pre", kind="fmadd_nan_operands",
+         opcodes=["fmadd.d"], source="XS#2642 fixed: fmadd.d non-canonical NaN",
+         note="pre predicate covers NaN operands, inf*0, and explicit-inf "
+              "product with opposite-sign inf addend; finite-operand product "
+              "overflow is not modeled (would need FP range logic) — the "
+              "post-tier equivalent (check the produced value) is exact and "
+              "maintenance-free"),
     dict(id="xs4639", tier="post", phase="post", kind="trap_on",
          opcodes=["fld"], causes=[4, 5], source="XS#4639 fixed: fld fault random mtval"),
     dict(id="xs5695", tier="pre", phase="pre", kind="ea_misaligned",
          opcodes=["lw", "sw", "ld", "sd", "lb", "lbu", "sb", "lh", "lhu", "sh"],
          region=[0x10000000, 0x1F000000], source="XS#5695 fixed: MMIO misaligned wrong exception"),
     dict(id="xs5721", tier="pre", phase="pre", kind="csr_write_bits",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          csr=[0x7A1], mask=0x10, source="XS#5721 open: mcontrol6 chain WARL"),
-    dict(id="xs5725", tier="static", phase="pre", kind="operand_reserved",
+    dict(id="xs5725", tier="text", phase="pre", kind="operand_reserved",
+         class_opcodes=["vsetvl", "vsetvli"],
          source="XS#5725 fixed: vsetvl rd=x0,rs1=x0 reserved"),
     dict(id="xs5739", tier="static", phase="pre", kind="csrr_vl_after_vsetvl",
+         class_opcodes=["csrr"],
          source="XS#5739 open: csrr vl stale after vsetvli"),
     dict(id="xs5765", tier="pre", phase="pre", kind="vector_state",
          vector="vl_lt_vlmax", opcodes=["vlm.v"], source="XS#5765 open: vlm.v corrupts v0 tail"),
@@ -108,7 +124,7 @@ SIGNATURES = [
     dict(id="xs5770", tier="post", phase="post", kind="trap_on",
          prefixes=["vl1re", "vl2re", "vl4re", "vl8re"], causes=[4, 5],
          source="XS#5770 open: whole-register load fault updates dest+vstart"),
-    dict(id="xs5772", tier="static", phase="pre", kind="operand_reg_align",
+    dict(id="xs5772", tier="text", phase="pre", kind="operand_reg_align",
          opcodes=["vmv1r.v", "vmv2r.v", "vmv4r.v", "vmv8r.v"],
          source="XS#5772 open: vmv<nr>r.v unaligned source not illegal"),
     dict(id="xs5773", tier="pre", phase="pre", kind="ea_misaligned",
@@ -120,7 +136,7 @@ SIGNATURES = [
     dict(id="xs5908", tier="pre", phase="pre", kind="ea_cross_boundary",
          opcodes=["sb", "sh", "sw", "sd"], boundary=16, size=4,
          source="XS#5908 open: store crossing 16B breaks UnalignQueue"),
-    dict(id="xs5919", tier="static", phase="pre", kind="operand_reg_align",
+    dict(id="xs5919", tier="text", phase="pre", kind="operand_reg_align",
          opcodes=["vmv1r.v", "vmv2r.v", "vmv4r.v", "vmv8r.v"],
          source="XS#5919 open: reserved vmv<nr>r.v encodings execute"),
     dict(id="xs5921", tier="post", phase="post", kind="trap_on",
@@ -129,7 +145,7 @@ SIGNATURES = [
     dict(id="xs5928", tier="pre", phase="pre", kind="vector_state",
          vector="sew_eq", sew=32, opcodes=["vsext.vf4"],
          source="XS#5928 open: vsext.vf4 SEW=e32 wrong source elements"),
-    dict(id="xs5930", tier="static", phase="pre", kind="operand_masked",
+    dict(id="xs5930", tier="text", phase="pre", kind="operand_masked",
          opcodes=["vle8ff.v"], source="XS#5930 open: masked vle8ff.v bit7 corruption"),
     dict(id="xs5931", tier="pre", phase="pre", kind="ea_misaligned",
          opcodes=["vlseg2e32ff.v"], vector_element=True,
@@ -147,6 +163,7 @@ SIGNATURES = [
          opcodes=["vsse16.v", "vsse32.v", "vsse64.v"], causes=[6, 7],
          source="XS#5943 open: strided store fault mtval wrong element"),
     dict(id="xs6001", tier="pre", phase="pre", kind="csr_write_bits",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          csr=[0xF59], mask=1 << 9, source="XS#6001 open: mvip.SEIP priority"),
     dict(id="xs6015", tier="post", phase="post", kind="trap_on",
          prefixes=["vluxei", "vloxei"], causes=[4, 5],
@@ -154,10 +171,11 @@ SIGNATURES = [
     dict(id="xs6022", tier="post", phase="post", kind="trap_on",
          opcodes=["vlse64.v"], causes=[4, 5],
          source="XS#6022 open: strided load illegal address no fault"),
-    dict(id="xs6000", tier="static", phase="pre", kind="opcode_set",
+    dict(id="xs6000", tier="text", phase="pre", kind="opcode_set",
          opcodes=["c.jr", "c.jalr"], class_suppression=True,
          source="XS#6000 open: compressed jump redirect loses isRVC (class-wide)"),
     dict(id="xs5910", tier="pre", phase="pre", kind="jalr_target_region",
+         class_opcodes=["jalr"],
          region=[0x10000000, 0x1F000000],
          source="XS#5910 open: cross-page MMIO fetch reports wrong mepc/mtval"),
     dict(id="xs5998", tier="pre", phase="pre", kind="load_overlap_crossing_store",
@@ -166,19 +184,22 @@ SIGNATURES = [
     # ---- CVA6 acknowledged bugs ----
     dict(id="cva6-1466", tier="pre", phase="pre", kind="branch_not_taken_misaligned",
          source="CVA6 #1466 fixed: not-taken branch with misaligned target traps"),
-    dict(id="cva6-898", tier="static", phase="pre", kind="opcode_set",
+    dict(id="cva6-898", tier="text", phase="pre", kind="opcode_set",
          opcodes=["ecall", "ebreak"], class_suppression=True,
          source="CVA6 #898/#448 confirmed: ecall/ebreak tval written with instruction bits"),
     dict(id="cva6-3174", tier="post", phase="post", kind="trap_on",
          opcodes=["sb", "sh", "sw", "sd", "fsb", "fsh", "fsw", "fsd"], causes=[7],
          source="CVA6 #3174 fixed: PMP store violation reported as load access fault"),
     dict(id="cva6-3457", tier="pre", phase="pre", kind="csr_write_bits",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          csr=[0x302], mask=1 << 9,
          source="CVA6 #3457 open: medeleg[9] not retained"),
     dict(id="cva6-3511", tier="pre", phase="pre", kind="csr_write_value",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          csr=[0x30C, 0x10C], field_mask=0x30, field_value=0x20,
          source="CVA6 #3511 fixed: CBIE reserved 2'b10 accepted"),
     dict(id="cva6-3316", tier="pre", phase="pre", kind="csr_write_bits",
+         class_opcodes=sorted(ALL_CSR_OPCODES),
          csr=[0x341, 0x141, 0x241], mask=0x2,
          config_note="targets IALIGN=32 (C-extension disabled) configs only",
          source="CVA6 #3316 fixed: mepc bit[1] not masked without RVC"),
@@ -186,17 +207,22 @@ SIGNATURES = [
     dict(id="boom698", tier="pre", phase="pre", kind="misaligned_overlap_locked",
          opcodes=["lh", "lhu", "lw", "lwu", "ld", "flh", "flw", "fld"],
          source="BOOM #698 confirmed: misaligned load over M-private region leaks data"),
-    dict(id="boom503", tier="post", phase="post", kind="fflags_bits",
-         opcodes=["fdiv.d", "fdiv.s"], bits=0x10,
-         source="BOOM #503 closed: fdiv invalid-operation flag not set"),
+    dict(id="boom503", tier="pre", phase="pre", kind="fdiv_invalid_operands",
+         opcodes=["fdiv.d", "fdiv.s"],
+         source="BOOM #503 closed: fdiv invalid-operation flag not set",
+         note="complete IEEE invalid condition for divide: 0/0, inf/inf, or "
+              "signaling-NaN operand — all operand-bit patterns, no "
+              "execution needed; the post-tier equivalent reads fflags"),
     dict(id="boom504", tier="pre", phase="pre", kind="ea_misaligned",
          opcodes=["lr.w", "lr.d"], size_override={"lr.w": 4, "lr.d": 8},
          source="BOOM #504 closed: misaligned LR still sets reservation"),
     dict(id="boom574", tier="pre", phase="pre", kind="jalr_target_misaligned",
+         class_opcodes=["jalr"],
          ialign32=True,
          config_note="targets IALIGN=32 configs; bit0 targets are illegal everywhere",
          source="BOOM #574 closed: jalr to misaligned target executes"),
     dict(id="boom771", tier="pre", phase="pre", kind="csr_imm_read_low_priv",
+         class_opcodes=["csrrsi"],
          source="BOOM #771 open: U-mode CSRRSI uimm=0 skips mcounteren check"),
     # ---- Rocket acknowledged bugs ----
     dict(id="rkt3829", tier="pre", phase="pre", kind="pmp_empty_tor_load",
@@ -604,6 +630,76 @@ def _eval_pre(ctx, sig: dict) -> Optional[str]:
                         f"store at 0x{sea:x} (forwarding bug class)")
         return None
 
+    if kind == "fdiv_invalid_operands":
+        if ctx.s_pre is None or len(ctx.operands) < 3:
+            return None
+        width = 32 if op.endswith(".s") else 64
+        mant_bits = 52 if width == 64 else 23
+        exp_all = (0x7FF if width == 64 else 0xFF) << mant_bits
+
+        def classify(token):
+            reg = ctx.parse_register_operand(token)
+            if reg is None:
+                return None
+            raw = ctx.s_pre.get_fpr(reg)
+            if isinstance(raw, bytes):
+                raw = int.from_bytes(raw[: width // 8], "little")
+            raw &= FULL64
+            if raw & exp_all == exp_all:
+                frac = raw & ((1 << mant_bits) - 1)
+                if frac == 0:
+                    return "inf"
+                return "qnan" if (frac >> (mant_bits - 1)) & 1 else "snan"
+            if raw & ~((1 << (width - 1))) == 0:
+                return "zero"
+            return "num"
+
+        ca = classify(ctx.operands[1])
+        cb = classify(ctx.operands[2])
+        if ca is None or cb is None:
+            return None
+        if (ca == "zero" and cb == "zero") or (ca == "inf" and cb == "inf") \
+                or ca == "snan" or cb == "snan":
+            return f"{op} invalid operands ({ca}/{cb}) - NV will be raised"
+        return None
+
+    if kind == "fmadd_nan_operands":
+        if ctx.s_pre is None or len(ctx.operands) < 4:
+            return None
+        width = 32 if op.endswith(".s") else 64
+        mant_bits = 52 if width == 64 else 23
+        exp_all = (0x7FF if width == 64 else 0xFF) << mant_bits
+
+        def classify(token):
+            reg = ctx.parse_register_operand(token)
+            if reg is None:
+                return None, None
+            raw = ctx.s_pre.get_fpr(reg)
+            if isinstance(raw, bytes):
+                raw = int.from_bytes(raw[: width // 8], "little")
+            raw &= FULL64
+            sign = raw >> (width - 1)
+            if raw & exp_all == exp_all:
+                frac = raw & ((1 << mant_bits) - 1)
+                if frac == 0:
+                    return "inf", sign
+                return ("qnan" if (frac >> (mant_bits - 1)) & 1 else "snan"), sign
+            if raw & ~((1 << (width - 1))) == 0:
+                return "zero", sign
+            return "num", sign
+
+        ca, sa = classify(ctx.operands[1])
+        cb, sb = classify(ctx.operands[2])
+        cc, sc = classify(ctx.operands[3])
+        if None in (ca, cb, cc):
+            return None
+        if "nan" in (ca, cb, cc):
+            return f"{op} has NaN operand - result will be NaN"
+        prod_inf = ("inf" in (ca, cb)) or ("zero" in (ca, cb) and "inf" in (ca, cb))
+        if prod_inf and cc == "inf" and ((sa ^ sb) != sc):
+            return f"{op} inf-product + opposite-sign inf - result will be NaN"
+        return None
+
     if kind == "misaligned_overlap_locked":
         if not _matches(op, sig):
             return None
@@ -759,37 +855,72 @@ def _eval_warl_dropped(ctx) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 class SignatureFilter(PrecisionFilter):
-    def __init__(self, sig: dict):
+    """Precise predicate when the group's budget allows it; otherwise the
+    coarsest correlated class rejection (best-effort interception)."""
+
+    def __init__(self, sig: dict, group_tier: str):
         tier = sig["tier"]
-        phase = FilterPhase.PRE_EXECUTION if sig.get("phase", "pre") == "pre" else FilterPhase.POST_EXECUTION
-        opcodes = list(sig.get("opcodes", [])) or None
+        scope = list(sig.get("opcodes", [])) or list(sig.get("class_opcodes", [])) or None
+        # Class fallback needs no execution result, so below the precise
+        # tier the filter runs at pre-execution phase even for post-tier
+        # signatures.
+        fallback = TIER_RANK[group_tier] < TIER_RANK[tier] and bool(scope)
+        phase = (
+            FilterPhase.PRE_EXECUTION
+            if fallback or sig.get("phase", "pre") == "pre"
+            else FilterPhase.POST_EXECUTION
+        )
         super().__init__(
             name=f"SIG-{sig['id']}",
             phase=phase,
-            opcodes=opcodes,
-            description=f"{sig.get('source', '')} [min tier: {tier}]",
+            opcodes=scope,
+            description=f"{sig.get('source', '')} [precise tier: {tier}]",
         )
         self.sig = sig
+        self.group_tier = group_tier
 
     def check(self, ctx) -> FilterResult:
         sig = self.sig
-        reason = None
-        if sig["tier"] == "static" or sig.get("phase", "pre") == "pre":
-            reason = _eval_static(ctx, sig)
-            if reason is None:
-                reason = _eval_pre(ctx, sig)
-        else:
-            reason = _eval_post(ctx, sig)
-        if reason:
-            return FilterResult.reject(f"[{sig['id']}] {reason}")
+        if TIER_RANK[self.group_tier] >= TIER_RANK[sig["tier"]]:
+            # This group's information budget covers the precise predicate.
+            reason = None
+            if sig.get("phase", "pre") == "pre":
+                reason = _eval_static(ctx, sig)
+                if reason is None:
+                    reason = _eval_pre(ctx, sig)
+            else:
+                reason = _eval_post(ctx, sig)
+            if reason:
+                return FilterResult.reject(f"[{sig['id']}] {reason}")
+            return FilterResult.accept()
+        # Best-effort fallback: reject the whole correlated instruction
+        # class.  Benign twins inside the class are killed -- the analyzer
+        # records this as class-level interception (over-rejection cost).
+        # Signatures without an explicit opcode scope cannot correlate a
+        # class and therefore cannot fall back (recorded as a miss).
+        scope = sig.get("opcodes") or sig.get("class_opcodes")
+        if scope and _matches(_op(ctx), sig):
+            return FilterResult.reject(
+                f"[{sig['id']}|class] opcode class suppressed: information "
+                f"for the precise predicate is unavailable at "
+                f"{self.group_tier} level"
+            )
         return FilterResult.accept()
 
 
-def register_signatures(registry, max_tier: str) -> None:
-    """Register every signature whose minimum tier fits the policy budget."""
-    for sig in SIGNATURES:
-        if TIER_RANK[sig["tier"]] <= TIER_RANK[max_tier]:
-            registry.register(SignatureFilter(sig))
+def register_signatures(registry, group_tier: str) -> None:
+    """Register every signature in this group: precise when the group's
+    information budget covers the signature's tier, class-level fallback
+    otherwise (best-effort interception)."""
+    # Precise-eligible signatures are registered first so their exact
+    # predicates take precedence over other signatures' class fallbacks
+    # within the same group.
+    ordered = sorted(
+        SIGNATURES,
+        key=lambda sig: TIER_RANK[sig["tier"]] > TIER_RANK[group_tier],
+    )
+    for sig in ordered:
+        registry.register(SignatureFilter(sig, group_tier))
 
 
 def signature_index() -> dict:

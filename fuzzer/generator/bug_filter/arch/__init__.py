@@ -52,6 +52,12 @@ def register_architecture_filters(
         from . import rocket_filters
 
         rocket_filters.register_filters(registry)
+    elif arch == "exp_text":
+        # Filtering-specificity experiment, text-only group:
+        # opcode + operand text (classic known-bug table grain).
+        from . import exp_text_filters
+
+        exp_text_filters.register_filters(registry)
     elif arch == "exp_static":
         # Filtering-specificity experiment, category 1:
         # static / generated-program information only.

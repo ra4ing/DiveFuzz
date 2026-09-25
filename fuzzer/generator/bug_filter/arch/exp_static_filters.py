@@ -5,18 +5,12 @@
 
 """Static / generated-program information policy (``exp_static``).
 
-Information budget (category 1 only):
-- opcode and operand TEXT (register names, CSR names/addresses, immediates)
-- ISA / target-configuration knowledge
-- generation history: instructions already accepted into the program
+Information budget: opcode and operand TEXT, ISA / target-configuration
+knowledge, and the accepted-program generation history (including recorded
+execution facts of already-accepted instructions).  Structurally denied:
+runtime state and execution outcomes.
 
-Structurally denied: any runtime register/CSR value, privilege, reservation,
-vector state, and anything observed after execution.  The per-case runner
-enforces this by building FilterContext with ``spike_session=None, s_pre=None,
-s_post=None``.
-
-All filters come from the shared signature table (experiment_signatures);
-this module registers every signature whose minimum tier is "static".
+Paper-level grouping: static information (superset of exp_text).
 """
 
 from __future__ import annotations
@@ -25,7 +19,7 @@ from .experiment_signatures import register_signatures
 
 
 def register_filters(registry):
-    register_signatures(registry, max_tier="static")
+    register_signatures(registry, group_tier="static")
 
 
 __all__ = ["register_filters"]
