@@ -687,29 +687,55 @@ class SpikeSession:
     # Trap/Exception Methods
     #==========================================================================
 
+    # Standard RISC-V trap cause codes -> short names.
+    TRAP_CAUSE_NAMES = {
+        0: "instruction_address_misaligned",
+        1: "instruction_access_fault",
+        2: "illegal_instruction",
+        3: "breakpoint",
+        4: "load_address_misaligned",
+        5: "load_access_fault",
+        6: "store_amo_address_misaligned",
+        7: "store_amo_access_fault",
+        8: "environment_call_from_U",
+        9: "environment_call_from_S",
+        11: "environment_call_from_M",
+        12: "instruction_page_fault",
+        13: "load_page_fault",
+        15: "store_amo_page_fault",
+        18: "software_check",
+        19: "hardware_error",
+        20: "instruction_guest_page_fault",
+        21: "load_guest_page_fault",
+        22: "virtual_instruction",
+        23: "store_amo_guest_page_fault",
+    }
+
     def get_last_trap_info(self):
         """
-        Get detailed trap information from last execution.
+        Trap information for the last execute_sequence call.
 
-        Returns TrapInfo with:
-        - occurred: Whether a trap occurred
-        - cause: Trap cause code
-        - tval: Trap value (bad address/instruction)
-        - tval2: Second trap value (guest physical address)
-        - tinst: Trapped instruction encoding
-        - has_gva: Has guest virtual address
-        - name: Human-readable trap name
-
-        Returns:
-            TrapInfo object (check .occurred field)
-
-        Raises:
-            RuntimeError: If session not initialized
+        derive TrapInfo from the engine's step-inference flag: the engine
+        detects traps by handler step counts (was_last_execution_trapped)
+        and the C++ layer never populates the structured TrapInfo.  mcause
+        (0x342) and mtval (0x343) are read after execution; the template
+        trap handler (mepc += 4; mret) leaves them untouched, and checkpoint
+        restore rolls flag and CSRs back, so rejected candidates do not leak
+        trap state into later queries.
         """
         if not self.initialized:
             raise RuntimeError("Session not initialized")
-        return self._state_query.get_last_trap_info()
-
+        import spike_engine
+        info = spike_engine.TrapInfo()
+        if self.was_last_execution_trapped():
+            info.occurred = True
+            info.cause = int(self.get_csr(0x342))
+            info.tval = int(self.get_csr(0x343))
+            info.name = self.TRAP_CAUSE_NAMES.get(
+                info.cause, f"cause_{info.cause}"
+            )
+        self._state_query.set_trap_info(info)
+        return info
     def clear_trap_info(self):
         """
         Clear trap information.
