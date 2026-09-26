@@ -422,7 +422,9 @@ def _eval_pre(ctx, sig: dict) -> Optional[str]:
             if ea % elem != 0:
                 return f"vector load with misaligned base 0x{ea:x} (elem {elem}B)"
             return None
-        size = (sig.get("size_override") or {}).get(op) or SCALAR_MEMORY_SIZES.get(op)
+        size = ((sig.get("size_override") or {}).get(op)
+                or SCALAR_MEMORY_SIZES.get(op)
+                or (4 if op.endswith(".w") else 8 if op.endswith(".d") else None))
         if not size or size == 1:
             return None
         base_reg, imm = _mem_operand_raw(ctx)
