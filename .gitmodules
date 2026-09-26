@@ -11,7 +11,7 @@
 	branch = dev-difftest
 [submodule "ref/riscv-isa-sim-adapter"]
 	path = ref/riscv-isa-sim-adapter
-	url = https://github.com/youzi27/riscv-isa-sim-adapter.git
+	url = https://github.com/ra4ing/riscv-isa-sim-adapter.git
 	branch = spike-adapter
 [submodule "ref/riscv-isa-sim"]
 	path = ref/riscv-isa-sim
