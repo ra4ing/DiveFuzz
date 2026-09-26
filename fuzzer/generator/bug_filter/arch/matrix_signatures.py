@@ -12,7 +12,10 @@ Arms (information budgets) reuse the signature tiers:
 
   arm "text"    = tier text   (opcode + operand text)
   arm "static"  = tier static (+ generation history)
-  arm "dynamic" = tier post   (+ runtime state before/after execution)
+  arm "operval" = static + current values of the operand registers only
+                  (write value = source register, effective address = base
+                  register + immediate, vsetvli AVL = rs1)
+  arm "dynamic" = tier post   (+ full runtime state before/after execution)
 
 Per-arm evaluation mirrors experiment_signatures.SignatureFilter:
 precise predicate when the arm's budget covers the row's tier, otherwise
@@ -445,7 +448,18 @@ MATRIX_ROWS = [
 ROW_INDEX = {r["id"]: r for r in MATRIX_ROWS}
 
 # 臂 → 信息预算（tier 秩；与 experiment_signatures.TIER_RANK 一致）
-ARM_TIER = {"text": 0, "static": 1, "dynamic": 3}
+ARM_TIER = {"text": 0, "static": 1, "operval": 2, "dynamic": 3}
+
+# Kinds whose precise predicates consume nothing beyond the instruction text
+# and the current values of its operand registers.
+OPERVAL_KINDS = {
+    "csr_write_bits",          # write value = source operand register
+    "csr_write_field_eq",      # ditto
+    "csr_write_field_notin",   # ditto
+    "ea_misaligned",           # base register value + immediate
+    "ea_misaligned_cross_page",
+    "vsetvli_avl_range",       # rs1 value or immediate AVL
+}
 _ROW_TIER_RANK = {"text": 0, "static": 1, "pre": 2, "post": 3}
 
 
@@ -695,7 +709,9 @@ def evaluate_row_arm(ctx_pre, ctx_post, sig: dict, arm: str):
     """
     arm_rank = ARM_TIER[arm]
     row_rank = _ROW_TIER_RANK[sig["tier"]]
-    if arm_rank >= row_rank:
+    covers = arm_rank >= row_rank or (arm == "operval"
+                                      and sig["kind"] in OPERVAL_KINDS)
+    if covers:
         ctx = ctx_post if sig.get("phase", "pre") == "post" else ctx_pre
         if ctx is None:
             return None
