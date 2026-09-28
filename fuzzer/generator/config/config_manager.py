@@ -29,6 +29,8 @@ class Config:
         
         self.architecture = str(args.architecture)
         bug_filter.set_architecture(self.architecture)
+        if bool(getattr(args, "no_bug_filter", False)):
+            bug_filter.registry = {}   # empty registry: filter inert
 
         self.template_type = str(args.template_type)
 

@@ -127,6 +127,12 @@ def create_parser():
         default=[],
         help='List of extensions (separated by spaces) to be excluded at mutation/generation time'
     )
+    parser.add_argument(
+        '--no-bug-filter', action='store_true',
+        help='Disable the known-bug instruction filter (experimental '
+             'control: align DiveFuzz with RevFuzz runs that pass '
+             '--no-bug-filter)'
+    )
 
 
     return parser
